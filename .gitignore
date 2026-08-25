@@ -26,3 +26,5 @@ docs/
 # Local-only copies of design mockups published as Claude artifacts during
 # this project's work - not part of the shipped site, kept for reference.
 local-artifacts/
+
+.vercel
