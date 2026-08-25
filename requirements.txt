@@ -1,0 +1,8 @@
+pandas
+plotly
+requests
+python-dotenv
+jupyter
+nbformat
+shapely
+playwright

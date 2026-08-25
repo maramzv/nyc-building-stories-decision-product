@@ -1,0 +1,1283 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NYC Building Stories</title>
+<script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+<link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/deck.gl@8.9.35/dist.min.js"></script>
+<script src="src/building_story.js"></script>
+<style>
+  html, body, #map { margin: 0; padding: 0; width: 100%; height: 100%; background: #0b0e14; font-family: -apple-system, "Segoe UI", sans-serif; }
+  #panel {
+    position: absolute; top: 16px; left: 16px; width: 320px;
+    background: rgba(18, 20, 28, 0.72); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    color: #e8eaf0; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);
+    padding: 16px 18px; box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    max-height: calc(100vh - 32px); overflow-y: auto;
+    scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.2) transparent; /* Firefox */
+  }
+  #panel::-webkit-scrollbar, #evidence-table::-webkit-scrollbar, #search-results::-webkit-scrollbar { width: 6px; }
+  #panel::-webkit-scrollbar-track, #evidence-table::-webkit-scrollbar-track, #search-results::-webkit-scrollbar-track { background: transparent; }
+  #panel::-webkit-scrollbar-thumb, #evidence-table::-webkit-scrollbar-thumb, #search-results::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.2); border-radius: 10px;
+  }
+  #panel::-webkit-scrollbar-thumb:hover, #evidence-table::-webkit-scrollbar-thumb:hover, #search-results::-webkit-scrollbar-thumb:hover {
+    background: #00b2a9;
+  }
+  #evidence-table, #search-results { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.2) transparent; }
+  #panel h1 { font-size: 16px; margin: 0 0 4px 0; }
+  #panel .sub { font-size: 12px; color: #9aa1b2; margin-bottom: 14px; }
+  #legend { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+  #legend .row {
+    border-radius: 5px; transition: background 0.12s, opacity 0.12s;
+  }
+  #legend.filtering .row:not(.active) { opacity: 0.35; }
+  #legend .row-main {
+    display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+    padding: 3px 5px; margin: -3px -5px; border-radius: 5px; transition: background 0.12s;
+  }
+  #legend .row-main:hover { background: rgba(255,255,255,0.06); }
+  #legend .swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+  #legend .row-label { flex: 1; min-width: 0; }
+  #legend .info-btn {
+    flex-shrink: 0; width: 16px; height: 16px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.18); background: transparent; color: #8a90a0;
+    font-size: 10px; line-height: 1; font-style: italic; font-family: Georgia, serif;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    padding: 0; transition: border-color 0.12s, color 0.12s, background 0.12s;
+  }
+  #legend .info-btn:hover, #legend .info-btn:focus-visible { border-color: rgba(255,255,255,0.5); color: #e8eaf0; background: rgba(255,255,255,0.08); }
+  #legend .row.info-open .info-btn { border-color: #7d8bff; color: #7d8bff; }
+  #legend .legend-expand { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.18s ease; }
+  #legend .legend-expand > div { overflow: hidden; }
+  #legend .row.info-open .legend-expand { grid-template-rows: 1fr; }
+  #legend .legend-expand-inner {
+    font-size: 11px; line-height: 1.5; color: #9aa1b2;
+    padding: 6px 5px 8px 25px; margin-top: -2px;
+  }
+  #search-wrap { position: relative; margin-top: 12px; }
+  #search-box {
+    width: 100%; box-sizing: border-box; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+    color: #e8eaf0; font-size: 12px; padding: 9px 11px 9px 28px; border-radius: 7px; outline: none;
+  }
+  #search-box:focus { border-color: rgba(255,255,255,0.3); }
+  #search-box::placeholder { color: #6c7180; }
+  #search-box.no-match { border-color: #d9a63e; }
+
+  /* Left icon inside the search box has 3 states: a resting magnifying
+     glass, the selection pin once a building is chosen, and a spinner
+     while an Enter-triggered lookup/flyTo is in flight. */
+  #search-icon { position: absolute; left: 10px; top: 10px; width: 13px; height: 13px; pointer-events: none; }
+  #search-icon.state-default {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'><path fill='none' stroke='%239aa1b2' stroke-width='2' d='M10 2a8 8 0 105.29 14.29l5.21 5.21 1.5-1.5-5.21-5.21A8 8 0 0010 2zm0 2a6 6 0 110 12 6 6 0 010-12z'/></svg>");
+    background-size: contain; background-repeat: no-repeat;
+  }
+  #search-icon.state-pin {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'><path fill='white' d='M12 0C7.58 0 4 3.58 4 8c0 5.25 8 16 8 16s8-10.75 8-16c0-4.42-3.58-8-8-8zm0 11a3 3 0 110-6 3 3 0 010 6z'/></svg>");
+    background-size: contain; background-repeat: no-repeat;
+  }
+  #search-icon.state-loading {
+    border: 2px solid rgba(255,255,255,0.25); border-top-color: #fff; border-radius: 50%;
+    box-sizing: border-box; animation: search-spin 0.7s linear infinite;
+  }
+  @keyframes search-spin { to { transform: rotate(360deg); } }
+
+  #search-no-match { display: none; font-size: 11.5px; color: #d9a63e; margin-top: 6px; padding: 0 2px; }
+  #search-no-match.visible { display: block; }
+
+  #search-action-row {
+    display: none; align-items: center; justify-content: space-between;
+    margin-top: 6px; padding: 0 2px; font-size: 12px; color: #9aa1b2;
+  }
+  #search-action-row.visible { display: flex; }
+  #search-action-view, #search-action-clear { cursor: pointer; }
+  #search-action-view:hover, #search-action-clear:hover { color: #fff; }
+  #search-results {
+    display: none; position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px; z-index: 5;
+    background: #14161e; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; overflow: hidden;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5); max-height: 220px; overflow-y: auto;
+  }
+  #search-results.open { display: block; }
+  .search-result { padding: 9px 11px; font-size: 11px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+  .search-result:hover { background: rgba(255,255,255,0.06); }
+  .search-result span:first-child { color: #d0d3dd; }
+
+  #boroughs { margin-top: 14px; padding-top: 14px; border-top: 1px solid #333747; }
+  .boro-row { margin-bottom: 10px; cursor: pointer; }
+  .boro-row:hover .boro-name { color: #fff; }
+  .boro-name { font-size: 12px; color: #d0d3dd; margin-bottom: 4px; display: flex; justify-content: space-between; }
+  .boro-name .n { color: #767c8c; }
+  .boro-name.selected { color: #fff; }
+  .boro-name.selected span:first-child { font-weight: 700; }
+  .boro-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #1a1d27; }
+  .boro-bar div { height: 100%; }
+
+  /* Explorer/Story two-state panel: both views share the same grid cell so
+     they can slide over one another; only the active one is display:block
+     at rest (toggled in JS after the transition ends) so the hidden view's
+     height doesn't get reserved by the grid when idle. */
+  #panel-stack { position: relative; display: grid; margin-top: 12px; }
+  #panel-stack > div { grid-area: 1 / 1; min-width: 0; transition: transform 0.32s ease, opacity 0.28s ease; }
+  #explorer-view { transform: translateX(0); opacity: 1; }
+  #story-view { display: none; transform: translateX(100%); opacity: 0; pointer-events: none; }
+  #panel-stack.show-story #explorer-view { transform: translateX(-100%); opacity: 0; pointer-events: none; }
+  #panel-stack.show-story #story-view { transform: translateX(0); opacity: 1; pointer-events: auto; }
+
+  /* Boroughs/Neighborhoods drill-down, nested one level inside Explorer -
+     same sliding technique as the outer Explorer/Story pair. Neighborhoods
+     view shows ALL of a borough's neighborhoods (no top-8 cap), since it
+     now has the whole panel to itself instead of competing with a nested
+     accordion list. */
+  #explorer-stack { position: relative; display: grid; margin-top: 14px; padding-top: 14px; border-top: 1px solid #333747; }
+  #explorer-stack > div { grid-area: 1 / 1; min-width: 0; transition: transform 0.32s ease, opacity 0.28s ease; }
+  #boroughs-view { transform: translateX(0); opacity: 1; }
+  #neighborhoods-view { display: none; transform: translateX(100%); opacity: 0; pointer-events: none; }
+  #explorer-stack.show-nbhd #boroughs-view { transform: translateX(-100%); opacity: 0; pointer-events: none; }
+  #explorer-stack.show-nbhd #neighborhoods-view { transform: translateX(0); opacity: 1; pointer-events: auto; }
+  #all-boroughs-back {
+    font-size: 12px; color: #9aa1b2; cursor: pointer; margin-bottom: 12px;
+    padding-bottom: 10px; border-bottom: 1px solid #333747; user-select: none;
+  }
+  #all-boroughs-back:hover { color: #fff; }
+  #neighborhoods-heading { font-size: 12px; font-weight: 700; color: #e8eaf0; margin-bottom: 12px; }
+
+  #back-button {
+    font-size: 12px; color: #9aa1b2; cursor: pointer; margin-bottom: 14px;
+    padding-bottom: 12px; border-bottom: 1px solid #333747; user-select: none;
+  }
+  #back-button:hover { color: #fff; }
+  #detail h2 { font-size: 14px; margin: 0 0 6px 0; display: flex; align-items: center; gap: 7px; }
+  .pattern-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  #detail .addr { font-size: 13px; color: #e8eaf0; font-weight: 500; margin-bottom: 10px; }
+  #detail .narrative { font-size: 13px; line-height: 1.5; margin-bottom: 12px; }
+  #detail .dims { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }
+  .dim-card {
+    position: relative; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px;
+    padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; cursor: pointer; user-select: none;
+  }
+  .dim-card:hover { border-color: rgba(255,255,255,0.14); }
+  .dim-card .dim-chev { position: absolute; top: 8px; right: 9px; font-size: 9px; color: #666c7c; line-height: 1; transition: transform 0.15s ease; }
+  .dim-card.open .dim-chev { transform: rotate(180deg); }
+  .dim-card .dim-k { font-size: 10px; color: #767c8c; text-transform: uppercase; letter-spacing: 0.03em; padding-right: 14px; }
+  .dim-card .dim-q { display: block; font-size: 11px; color: #9aa1b2; font-style: italic; margin-top: 1px; }
+  .dim-card .dim-v { font-size: 12.5px; color: #d0d3dd; font-weight: 600; }
+  .dim-expand { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.18s ease; }
+  .dim-expand > div { overflow: hidden; }
+  .dim-card.open .dim-expand { grid-template-rows: 1fr; }
+  .expand-inner { padding-top: 8px; margin-top: 6px; border-top: 1px dashed rgba(255,255,255,0.08); }
+  .expand-row { margin-bottom: 6px; }
+  .expand-row:last-child { margin-bottom: 0; }
+  .expand-label { font-size: 8px; letter-spacing: 0.05em; text-transform: uppercase; color: #666c7c; margin-bottom: 2px; }
+  .expand-body { font-size: 10.5px; line-height: 1.4; color: #9aa1b2; }
+  .ev-mini { font-size: 9.5px; color: #666c7c; padding: 2px 0; display: flex; justify-content: space-between; gap: 6px; border-bottom: 1px solid #23273499; }
+  .ev-mini:last-child { border-bottom: none; }
+  .ev-mini .ev-c { flex-shrink: 0; font-weight: 600; }
+  .ev-mini .ev-c.A { color: #e0c14c; }
+  .ev-mini .ev-c.B { color: #e69a4c; }
+  .ev-mini .ev-c.C { color: #e67a6e; }
+  .ev-mini .ev-desc { color: #a8adb9; }
+  .ev-more { font-size: 9px; color: #666c7c; text-align: right; margin-top: 2px; }
+  .similar { font-size: 11.5px; color: #9aa1b2; margin-top: 10px; padding: 8px 10px; background: rgba(255,255,255,0.04); border-radius: 6px; line-height: 1.4; }
+
+  /* Skeleton loading state: shown the moment a building is selected, while
+     the real per-building narrative/dims are still being fetched live. */
+  .skel {
+    background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.11) 37%, rgba(255,255,255,0.05) 63%);
+    background-size: 400% 100%; animation: skel-pulse 1.4s ease infinite; border-radius: 4px;
+  }
+  @keyframes skel-pulse { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+  .skel-line { height: 12px; margin-bottom: 8px; }
+  .skel-k { height: 8px; width: 55%; margin-bottom: 6px; }
+  .skel-v { height: 14px; width: 40%; }
+  #evidence-toggle {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid #333747;
+    font-size: 12px; color: #9aa1b2; cursor: pointer; user-select: none;
+  }
+  #evidence-toggle:hover { color: #fff; }
+  #evidence-count { color: #666c7c; }
+  #evidence-table { display: none; margin-top: 10px; max-height: 260px; overflow-y: auto; }
+  #evidence-table.open { display: block; }
+  .ev-row { font-size: 11px; padding: 7px 0; border-bottom: 1px solid #23273499; }
+  .ev-row .ev-top { display: flex; justify-content: space-between; color: #8a90a0; margin-bottom: 2px; }
+  .ev-row .ev-class-A { color: #e0c14c; font-weight: 600; }
+  .ev-row .ev-class-B { color: #e69a4c; font-weight: 600; }
+  .ev-row .ev-class-C { color: #e67a6e; font-weight: 600; }
+  .ev-row .ev-desc { color: #c4c7d1; line-height: 1.4; }
+  #evidence-more { font-size: 10.5px; color: #666c7c; padding-top: 6px; text-align: center; }
+  #d-buildingid { font-size: 10.5px; color: #666c7c; margin-top: 12px; text-align: center; }
+  #status { position: absolute; bottom: 34px; right: 8px; color: #9aa1b2; font-size: 11px; background: rgba(20,22,30,0.8); padding: 6px 10px; border-radius: 6px; z-index: 2; text-align: right; }
+  #status .status-credit { display: block; margin-top: 3px; font-size: 9.5px; color: #666c7c; line-height: 1.35; }
+  #status .status-credit a { color: #767c8c; }
+  #status .status-credit a:hover { color: #9aa1b2; }
+
+  #tooltip {
+    position: absolute; display: none; pointer-events: none; z-index: 10;
+    background: rgba(15, 16, 22, 0.95); color: #e8eaf0; font-size: 12px;
+    padding: 8px 11px; border-radius: 7px; border: 1px solid rgba(255,255,255,0.08);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.4); max-width: 220px;
+  }
+  #tooltip .t-addr { font-weight: 600; margin-bottom: 2px; }
+  #tooltip .t-pattern { color: #9aa1b2; }
+  .nbhd-row { margin-bottom: 10px; cursor: pointer; }
+  .nbhd-row:hover .nbhd-name { color: #fff; }
+  .nbhd-name { font-size: 12px; color: #d0d3dd; margin-bottom: 4px; display: flex; justify-content: space-between; }
+  .nbhd-name .n { color: #767c8c; }
+  .nbhd-name.selected { color: #fff; }
+  .nbhd-name.selected span:first-child { font-weight: 700; }
+  .nbhd-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: #1a1d27; }
+  .nbhd-bar div { height: 100%; }
+
+  #landing {
+    position: absolute; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, #161a24 0%, #0b0e14 100%);
+  }
+  #landing .content { max-width: 560px; text-align: center; padding: 0 24px; color: #e8eaf0; }
+  #landing h1 { font-size: 34px; margin: 0 0 12px 0; font-weight: 700; letter-spacing: -0.01em; }
+  #landing .tagline { font-size: 15px; color: #9aa1b2; margin-bottom: 28px; line-height: 1.6; }
+  #landing .stats { display: flex; justify-content: center; gap: 28px; margin-bottom: 32px; }
+  #landing .stat .num { font-size: 26px; font-weight: 700; }
+  #landing .stat .lbl { font-size: 11px; color: #8a90a0; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 3px; }
+  #landing .legend-row { display: flex; justify-content: center; gap: 18px; margin-bottom: 32px; font-size: 12px; color: #b0b4c2; }
+  #landing .legend-row .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
+  #landing button {
+    background: #e8eaf0; color: #0b0e14; border: none; padding: 13px 32px; border-radius: 8px;
+    font-size: 14px; font-weight: 600; cursor: pointer; transition: transform 0.15s, opacity 0.15s;
+  }
+  #landing button:hover { transform: translateY(-1px); opacity: 0.9; }
+  #landing .hint { font-size: 11px; color: #666c7c; margin-top: 14px; }
+  #landing.hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h1 id="panel-title">NYC Building Stories</h1>
+  <div class="sub">Explore the map, click a building for details, or search an address.</div>
+  <div id="legend"></div>
+
+  <div id="panel-stack">
+    <div id="explorer-view">
+      <div id="search-wrap">
+        <span id="search-icon" class="state-default"></span>
+        <input id="search-box" type="text" placeholder="Search for an address..." autocomplete="off">
+        <div id="search-results"></div>
+        <div id="search-no-match">No open violations on record for this address</div>
+        <div id="search-action-row">
+          <span id="search-action-view">View Story &rarr;</span>
+          <span id="search-action-clear">&#10005; Clear</span>
+        </div>
+      </div>
+      <div id="explorer-stack">
+        <div id="boroughs-view">
+          <div id="boroughs"></div>
+        </div>
+        <div id="neighborhoods-view">
+          <div id="all-boroughs-back">&larr; All Boroughs</div>
+          <div id="neighborhoods-heading"></div>
+          <div id="neighborhoods-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="story-view">
+      <div id="back-button">&larr; Back to Directory</div>
+      <div id="detail">
+        <h2 id="d-headline"></h2>
+        <div class="addr" id="d-addr"></div>
+        <div class="narrative" id="d-narrative"></div>
+        <div class="dims" id="d-dims"></div>
+        <div class="similar" id="d-similar"></div>
+        <div id="evidence-toggle">Why we're saying this &rarr; <span id="evidence-count"></span></div>
+        <div id="evidence-table"></div>
+        <div id="d-buildingid"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="status">Loading building data...</div>
+<div id="tooltip"></div>
+
+<div id="landing">
+  <div class="content">
+    <h1>What is happening to NYC's buildings?</h1>
+    <div class="tagline">Every colored column is a real NYC building with at least one open housing violation on record. Explore the stories hidden in the city's housing records — from the citywide pattern down to a single address.</div>
+    <div class="stats" id="landing-stats"></div>
+    <div class="legend-row" id="landing-legend"></div>
+    <button id="landing-enter">Explore the map</button>
+    <div class="hint">Click a borough, then a neighborhood, then a building — or just fly around.</div>
+  </div>
+</div>
+
+<script>
+const PATTERN_COLORS = {
+  "No real defects": [80, 170, 70],
+  "Isolated":   [64, 216, 200],
+  "Widespread": [66, 133, 224],
+  "Persistent": [230, 180, 60],
+  "Chronic":    [220, 70, 60],
+};
+const PATTERN_LABELS = {
+  "No real defects": "No real defects — administrative filings only",
+  "Isolated":   "Isolated — a few real defects, none repeated",
+  "Widespread": "Widespread — many real defects, none repeated",
+  "Persistent": "Persistent — the same defect, repeated 3+ times",
+  "Chronic":    "Chronic — the same defect, repeated for years",
+};
+// Longer explanation shown when the legend row's info icon is tapped -
+// same facts as PATTERN_LABELS, just spelled out for someone who wants
+// more than the one-line version before trusting the color.
+const PATTERN_DETAILS = {
+  "No real defects": "Every violation on this building's record is administrative — a late registration filing, a missed bedbug report. No physical defect has ever been cited here.",
+  "Isolated": "This building has real physical defects on record, but only a handful, and none of them has ever been cited a second time.",
+  "Widespread": "This building has many real physical defects on record — more than the large majority of buildings with no repeating pattern — but none of them has ever been cited a second time.",
+  "Persistent": "The same specific defect has been cited 3 or more times over at least 2 years — it kept coming back after being flagged.",
+  "Chronic": "The same specific defect has been cited 10 or more times over at least 5 years — a problem that's gone unresolved for the better part of a decade.",
+};
+
+// All patterns are "active" (shown at full opacity) by default. Clicking a
+// legend row isolates that one pattern (dims the rest); clicking the sole
+// active row again restores all of them. Combines with the existing
+// borough/neighborhood dimming in getFillColor rather than replacing it -
+// a building only shows at full opacity when it satisfies both.
+let activePatterns = new Set(Object.keys(PATTERN_COLORS));
+
+const legend = document.getElementById('legend');
+for (const [k, c] of Object.entries(PATTERN_COLORS)) {
+  const row = document.createElement('div');
+  row.className = 'row active';
+  row.dataset.pattern = k;
+  row.innerHTML = `
+    <div class="row-main">
+      <div class="swatch" style="background: rgb(${c.join(',')})"></div>
+      <div class="row-label">${PATTERN_LABELS[k]}</div>
+      <button type="button" class="info-btn" aria-label="More about ${k}" aria-expanded="false">i</button>
+    </div>
+    <div class="legend-expand"><div><div class="legend-expand-inner">${PATTERN_DETAILS[k]}</div></div></div>`;
+  row.querySelector('.row-main').addEventListener('click', () => togglePatternFilter(k));
+  const infoBtn = row.querySelector('.info-btn');
+  infoBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = row.classList.toggle('info-open');
+    infoBtn.setAttribute('aria-expanded', String(open));
+  });
+  legend.appendChild(row);
+}
+
+function togglePatternFilter(pattern) {
+  const isolating = !(activePatterns.size === 1 && activePatterns.has(pattern));
+  activePatterns = isolating ? new Set([pattern]) : new Set(Object.keys(PATTERN_COLORS));
+  legend.classList.toggle('filtering', isolating);
+  for (const row of legend.querySelectorAll('.row')) {
+    row.classList.toggle('active', activePatterns.has(row.dataset.pattern));
+  }
+  refreshBuildingLayerStyling();
+}
+
+let NEIGHBORHOODS_BY_NAME = {};
+const EVIDENCE_DISPLAY_LIMIT = 100; // cap DOM rows for buildings with hundreds of records
+let currentRequestId = 0; // guards against a slow earlier click overwriting a newer one
+
+// Populated once the map/layers exist (see Promise.all below); showDetail()
+// uses these to outline the selected building and drop a pin on its roof,
+// so it's identifiable among many similarly-colored/sized neighbors.
+let selectedBuildingId = null;
+let selectedBuildingData = null; // full record - drives the search-bar selection UI + "View Story"
+let buildingLayers = [];
+let mapRef = null;
+let neighborhoodsRef = null;
+
+// The pin has to sit at the selected building's actual roof height (not
+// ground level), which a maplibregl.Marker (plain HTML, ground-projected
+// only) can't do - a deck.gl IconLayer positioned with a real [lon, lat,
+// altitude] renders correctly in 3D, and `billboard: true` keeps the icon
+// always facing the camera (flat and crisp) rather than laid flat on the
+// roof or skewed by pitch, so it still reads as a clean 2D pin glyph.
+const PIN_ICON_URL = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'><path fill='white' stroke='%23333' stroke-width='0.5' d='M12 0C7.58 0 4 3.58 4 8c0 5.25 8 16 8 16s8-10.75 8-16c0-4.42-3.58-8-8-8zm0 11a3 3 0 110-6 3 3 0 010 6z'/></svg>";
+let selectionPinLayer = null;
+
+function updateSelectionPin(d) {
+  if (!selectionPinLayer) return;
+  const roofHeight = Math.max(d.floors, 2) * 8 + 3; // matches ColumnLayer's elevation*elevationScale, +clearance
+  selectionPinLayer.setProps({ data: [{ ...d, height: roofHeight }] });
+}
+
+// Flies the camera back to a building and shows its Story view - used by
+// both the floating pin and the search bar's "View Story" link.
+function flyToBuilding(d) {
+  if (mapRef) mapRef.flyTo({ center: [d.lon, d.lat], zoom: 17, pitch: 60, duration: 1800 });
+  showStory(d.neighborhood, d.boro);
+}
+
+// The search box's left icon has 3 mutually-exclusive states - resting
+// magnifying glass, the selection pin, or a spinner while an Enter-triggered
+// lookup/flyTo is in flight (see renderSearch's keydown handler).
+function setSearchIcon(state) {
+  document.getElementById('search-icon').className = 'state-' + state;
+}
+
+function showNoMatchWarning() {
+  document.getElementById('search-box').classList.add('no-match');
+  document.getElementById('search-no-match').classList.add('visible');
+}
+
+function hideNoMatchWarning() {
+  document.getElementById('search-box').classList.remove('no-match');
+  document.getElementById('search-no-match').classList.remove('visible');
+}
+
+// The search bar doubles as the "current selection" indicator, Google-Maps-
+// style: its value becomes the selected building's address, a pin icon
+// appears inside it, and a compact action row appears underneath. Doesn't
+// touch the borough/neighborhood accordion state at all.
+function showSearchSelection(d) {
+  const box = document.getElementById('search-box');
+  box.value = d.address;
+  setSearchIcon('pin');
+  hideNoMatchWarning();
+  document.getElementById('search-action-row').classList.add('visible');
+  document.getElementById('search-results').classList.remove('open');
+  document.getElementById('search-action-view').onclick = () => flyToBuilding(d);
+  document.getElementById('search-action-clear').onclick = () => clearSelection();
+}
+
+function hideSearchSelection() {
+  const box = document.getElementById('search-box');
+  box.value = '';
+  setSearchIcon('default');
+  document.getElementById('search-action-row').classList.remove('visible');
+}
+
+// Which borough/neighborhood is currently expanded in the directory (see
+// renderBoroughs) - drives dimming every other building on the map so the
+// selected area actually stands out, since we don't have real boundary
+// polygon geometry cached to draw a highlighted outline instead.
+let selectedBoro = null;
+let selectedNeighborhood = null;
+
+function refreshBuildingLayerStyling() {
+  for (const layer of buildingLayers) {
+    layer.setProps({
+      updateTriggers: {
+        getLineColor: selectedBuildingId,
+        getFillColor: [selectedBoro, selectedNeighborhood, [...activePatterns].join(',')],
+      },
+    });
+  }
+}
+
+function markSelected(d) {
+  selectedBuildingId = d.buildingid;
+  selectedBuildingData = d;
+  // Selecting a building always syncs the dimming to *its* area, even if you
+  // were browsing a different borough/neighborhood in the directory - so the
+  // map and the panel never show two different areas as "the selected one".
+  selectedBoro = d.boro || null;
+  selectedNeighborhood = d.neighborhood || null;
+  refreshBuildingLayerStyling();
+  updateSelectionPin(d);
+  showSearchSelection(d);
+}
+
+// Clears the selected building entirely (outline, pin, search-bar selection
+// UI) - the "✕ Clear" action. Also resets the directory back to the
+// top-level Boroughs view (doesn't retain whatever borough/neighborhood was
+// last browsed) and replays the full landing-page fly-in, since Clear is
+// meant to be a genuine full reset, not just "forget this one building".
+function clearSelection() {
+  selectedBuildingId = null;
+  selectedBuildingData = null;
+  refreshBuildingLayerStyling();
+  if (selectionPinLayer) selectionPinLayer.setProps({ data: [] });
+  hideSearchSelection();
+  showBoroughsView(true, false); // reset the drill-down; skip its own flyTo, flyInFromStart() below replaces it
+  flyInFromStart();
+}
+
+// Explorer (directory) and Story (single-building) are two mutually-exclusive
+// panel states that slide over one another instead of stacking, so the panel
+// never has to show a long directory list AND a long evidence table at once.
+const SLIDE_MS = 320;
+
+// Which borough/neighborhood a Story view was opened from, so its Back
+// button can return to the right place in the drill-down (not just "the
+// top-level borough list") - set by showStory(), read by showExplorer().
+let storyBackTarget = null;
+
+function showStory(neighborhood, boro) {
+  const panelStack = document.getElementById('panel-stack');
+  const explorerEl = document.getElementById('explorer-view');
+  const storyEl = document.getElementById('story-view');
+  document.getElementById('back-button').textContent =
+    neighborhood ? `← Back to ${neighborhood}` : '← Back to Directory';
+  storyBackTarget = boro ? { boro, neighborhood } : null;
+  storyEl.style.display = 'block';
+  requestAnimationFrame(() => panelStack.classList.add('show-story'));
+  setTimeout(() => { explorerEl.style.display = 'none'; }, SLIDE_MS);
+}
+
+function showExplorer() {
+  // Pre-set the drill-down to the right borough's neighborhood list before
+  // Explorer becomes visible again - happens instantly while still hidden,
+  // so there's no visible flash of the wrong (top-level) list first.
+  if (storyBackTarget) {
+    showNeighborhoodsView(storyBackTarget.boro, false, storyBackTarget.neighborhood);
+  } else {
+    showBoroughsView(false);
+  }
+  const panelStack = document.getElementById('panel-stack');
+  const explorerEl = document.getElementById('explorer-view');
+  const storyEl = document.getElementById('story-view');
+  explorerEl.style.display = 'block';
+  requestAnimationFrame(() => panelStack.classList.remove('show-story'));
+  setTimeout(() => { storyEl.style.display = 'none'; }, SLIDE_MS);
+  // Deferred until Explorer is actually visible/laid out again, otherwise
+  // scrollIntoView on a still-display:none ancestor is a no-op.
+  if (storyBackTarget && storyBackTarget.neighborhood) {
+    requestAnimationFrame(() => {
+      const highlighted = document.querySelector('.nbhd-name.selected');
+      if (highlighted) highlighted.scrollIntoView({ block: 'center' });
+    });
+  }
+}
+
+document.getElementById('back-button').onclick = showExplorer;
+
+// Directory selection state - one bold "currently browsing" name at a time.
+// Independent of building selection, which lives entirely in the search bar.
+let selectedNameEl = null;
+
+function selectName(el) {
+  if (selectedNameEl) selectedNameEl.classList.remove('selected');
+  selectedNameEl = el;
+  el.classList.add('selected');
+}
+
+function buildNbhdRow(boro, n) {
+  const nRow = document.createElement('div');
+  nRow.className = 'nbhd-row';
+  const nCounts = { "No real defects": n.no_real_defects, Isolated: n.isolated, Widespread: n.widespread, Persistent: n.persistent, Chronic: n.chronic };
+  nRow.innerHTML = `
+    <div class="nbhd-name"><span>${n.neighborhood}</span><span class="n">${n.total}</span></div>
+    <div class="nbhd-bar">${patternBar(nCounts, n.total)}</div>`;
+  const nNameEl = nRow.querySelector('.nbhd-name');
+  nRow.onclick = (e) => {
+    e.stopPropagation();
+    mapRef.flyTo({ center: [n.lon, n.lat], zoom: 15, pitch: 60, duration: 1800 });
+    selectName(nNameEl);
+    selectedBoro = boro;
+    selectedNeighborhood = n.neighborhood;
+    refreshBuildingLayerStyling();
+  };
+  return nRow;
+}
+
+// Boroughs <-> Neighborhoods drill-down (nested one level inside Explorer,
+// same sliding technique as the outer Explorer/Story pair). Neighborhoods
+// view always shows ALL of a borough's neighborhoods, not a top-N cut -
+// SoHo/Tribeca (etc.) have relatively few sampled violations so they never
+// made an earlier top-8-by-count list, even though they're real entries.
+function showNeighborhoodsView(boro, animate = true, highlightNeighborhood = null) {
+  const stack = document.getElementById('explorer-stack');
+  const boroughsEl = document.getElementById('boroughs-view');
+  const nbhdEl = document.getElementById('neighborhoods-view');
+
+  const displayName = boro.charAt(0) + boro.slice(1).toLowerCase();
+  document.getElementById('neighborhoods-heading').textContent = `${displayName} Neighborhoods`;
+  const listEl = document.getElementById('neighborhoods-list');
+  listEl.innerHTML = '';
+  const boroNbhds = neighborhoodsRef.filter(n => n.boro === boro).sort((a, b) => b.total - a.total);
+  for (const n of boroNbhds) {
+    const row = buildNbhdRow(boro, n);
+    listEl.appendChild(row);
+    if (highlightNeighborhood && n.neighborhood === highlightNeighborhood) {
+      selectName(row.querySelector('.nbhd-name'));
+    }
+  }
+
+  selectedBoro = boro;
+  selectedNeighborhood = highlightNeighborhood || null;
+  refreshBuildingLayerStyling();
+
+  // Camera always matches whatever the panel is now showing - a specific
+  // neighborhood if we're highlighting one (e.g. returning from a building's
+  // Story view), otherwise the whole borough.
+  if (mapRef) {
+    const n = highlightNeighborhood && neighborhoodsRef.find(x => x.boro === boro && x.neighborhood === highlightNeighborhood);
+    if (n) {
+      mapRef.flyTo({ center: [n.lon, n.lat], zoom: 15, pitch: 60, duration: 1800 });
+    } else {
+      const target = BORO_CENTERS[boro];
+      if (target) mapRef.flyTo({ center: target.center, zoom: target.zoom, pitch: 55, duration: 1500 });
+    }
+  }
+
+  nbhdEl.style.display = 'block';
+  if (animate) {
+    requestAnimationFrame(() => stack.classList.add('show-nbhd'));
+    setTimeout(() => { boroughsEl.style.display = 'none'; }, SLIDE_MS);
+  } else {
+    stack.classList.add('show-nbhd');
+    boroughsEl.style.display = 'none';
+  }
+}
+
+function showBoroughsView(animate = true, fly = true) {
+  const stack = document.getElementById('explorer-stack');
+  const boroughsEl = document.getElementById('boroughs-view');
+  const nbhdEl = document.getElementById('neighborhoods-view');
+
+  selectedBoro = null;
+  selectedNeighborhood = null;
+  if (selectedNameEl) { selectedNameEl.classList.remove('selected'); selectedNameEl = null; }
+  refreshBuildingLayerStyling();
+  if (fly && mapRef) mapRef.flyTo({ ...HOME_VIEW, duration: 2200 });
+
+  boroughsEl.style.display = 'block';
+  if (animate) {
+    requestAnimationFrame(() => stack.classList.remove('show-nbhd'));
+    setTimeout(() => { nbhdEl.style.display = 'none'; }, SLIDE_MS);
+  } else {
+    stack.classList.remove('show-nbhd');
+    nbhdEl.style.display = 'none';
+  }
+}
+
+document.getElementById('all-boroughs-back').onclick = () => showBoroughsView();
+
+function renderSimilar(buildingid, pattern, neighborhood) {
+  const similarEl = document.getElementById('d-similar');
+  const nbhd = NEIGHBORHOODS_BY_NAME[neighborhood];
+  if (nbhd && nbhd.total > 1) {
+    const key = pattern.toLowerCase().replace(/ /g, '_');
+    const sameCount = (nbhd[key] || 0) - 1; // exclude this building itself
+    similarEl.style.display = 'block';
+    similarEl.textContent = sameCount > 0
+      ? `${sameCount} other building${sameCount !== 1 ? 's' : ''} analyzed in ${neighborhood} also show${sameCount === 1 ? 's' : ''} a ${pattern} pattern (of ${nbhd.total - 1} others sampled here).`
+      : `No other sampled buildings in ${neighborhood} show this pattern (of ${nbhd.total - 1} others sampled here).`;
+  } else {
+    similarEl.style.display = 'none';
+  }
+}
+
+function buildEvidenceFromRecords(records) {
+  const seen = new Set();
+  const trimmed = [];
+  for (const v of records) {
+    let desc = (v.novdescription || '').trim();
+    if (desc.length > 140) {
+      const cut = desc.slice(0, 140);
+      desc = cut.slice(0, cut.lastIndexOf(' ')) + '...';
+    }
+    const date = v.novissueddate ? v.novissueddate.slice(0, 10) : null;
+    const key = `${date}|${v.class}|${desc}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      trimmed.push({ date, class: v.class, status: v.currentstatus, description: desc });
+    }
+  }
+  trimmed.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  return trimmed;
+}
+
+function renderEvidence(records) {
+  const countEl = document.getElementById('evidence-count');
+  const tableEl = document.getElementById('evidence-table');
+  countEl.textContent = `(${records.length} record${records.length !== 1 ? 's' : ''})`;
+  tableEl.classList.remove('open');
+  const shown = records.slice(0, EVIDENCE_DISPLAY_LIMIT);
+  tableEl.innerHTML = shown.map(r => `
+    <div class="ev-row">
+      <div class="ev-top"><span class="${['A', 'B', 'C'].includes(r.class) ? 'ev-class-' + r.class : ''}">${r.date || 'no date'} · Class ${r.class || '?'}</span><span>${r.status || ''}</span></div>
+      <div class="ev-desc">${r.description || ''}</div>
+    </div>`).join('') +
+    (records.length > EVIDENCE_DISPLAY_LIMIT
+      ? `<div id="evidence-more">showing ${EVIDENCE_DISPLAY_LIMIT} of ${records.length} records</div>` : '');
+  document.getElementById('evidence-toggle').onclick = () => tableEl.classList.toggle('open');
+}
+
+function renderHeadline(pattern, scale) {
+  const color = PATTERN_COLORS[pattern] || [120, 120, 120];
+  document.getElementById('d-headline').innerHTML =
+    `<span class="pattern-dot" style="background: rgb(${color.join(',')})"></span>${pattern} · ${scale} scale`;
+}
+
+/* ---------- Per-tile "why" detail: meaning / observed number / evidence ----------
+ * Each of the six dimensions gets a tappable detail instead of just a bare
+ * value, so a viewer who's never seen the Building Story Key can still tell
+ * what a label means and why THIS building got it, without leaving the card. */
+
+const CERT_STATUSES = ['NOV CERTIFIED ON TIME', 'NOV CERTIFIED LATE', 'FALSE CERTIFICATION', 'INVALID CERTIFICATION'];
+const STATUS_SHORT = {
+  'NOT COMPLIED WITH': 'Not complied',
+  'NOV SENT OUT': 'Notice sent',
+  'NOV CERTIFIED LATE': 'Certified late',
+  'NOV CERTIFIED ON TIME': 'Certified on time',
+  'INVALID CERTIFICATION': 'Invalid cert',
+  'FALSE CERTIFICATION': 'False cert',
+};
+
+/**
+ * Turns a raw HPD description into a short label with no per-record
+ * hand-editing: strip the citation boilerplate every description opens
+ * with, then try a short list of common defect phrasings against what's
+ * left. Anything the rules don't recognize falls back to the same
+ * stripped-but-otherwise-unedited text shown in the full evidence table,
+ * just without the case numbers.
+ */
+function stripCitation(desc) {
+  return (desc || '').replace(
+    /^(?:HMC ADM CODE:\s*)?(?:§|SECTION)\s*[\d.,\s]+\s*(?:ADMIN\.?\s*CODE|ADM CODE|HMC)?:?\s*/i, ''
+  ).trim();
+}
+
+function sentenceCase(s) {
+  s = s.trim().toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function extractLocation(desc) {
+  const apt = desc.match(/\bAPT\s+([A-Z0-9]+)/i);
+  if (apt) return 'Apt ' + apt[1].toUpperCase();
+  const room = desc.match(/\bAT\s+([A-Z]+(?:\s[A-Z]+){0,2}\s+ROOM)\b/i);
+  return room ? sentenceCase(room[1]) : null;
+}
+
+const DEFECT_RULES = [
+  [/CONSISTING OF (?:A |AN )?([A-Z]+(?:\s[A-Z]+)?)\s+IN\b/i, m => sentenceCase(m[1])],
+  [/EVIDENCE OF (?:A |AN )?([A-Z]+(?:\s[A-Z]+)?)\s+AT\b/i, m => sentenceCase(m[1])],
+  [/REPAIR (?:THE )?(?:LEAKY AND\/OR |BROKEN OR )?DEFECTIVE ([A-Z]+(?:\s[A-Z]+)?)\s+(?:AT|IN)\b/i, m => 'Broken ' + m[1].toLowerCase()],
+  [/PROVIDE HOT WATER/i, () => 'No hot water'],
+  [/DOOR FROM BEING SELF-CLOSING/i, () => 'Door not self-closing'],
+  [/APPROVED AND OPERATIONAL ([A-Z]+(?:\s[A-Z]+)?)\s+DETECT/i, m => sentenceCase(m[1]) + ' detector missing'],
+];
+
+function shortLabel(description) {
+  const cleaned = stripCitation(description);
+  for (const [pattern, toDefect] of DEFECT_RULES) {
+    const m = cleaned.match(pattern);
+    if (m) {
+      const loc = extractLocation(description);
+      return loc ? `${toDefect(m)} · ${loc}` : toDefect(m);
+    }
+  }
+  return cleaned.length > 72 ? cleaned.slice(0, cleaned.lastIndexOf(' ', 72)) + '...' : cleaned;
+}
+
+function evMiniHTML(r) {
+  const status = STATUS_SHORT[r.status] || r.status || '';
+  return `<div class="ev-mini"><span><span class="ev-c ${['A','B','C'].includes(r.class) ? r.class : ''}">${r.class||'?'}</span> · ${r.date||'no date'}</span><span class="ev-desc">${shortLabel(r.description)}${status ? ' — ' + status : ''}</span></div>`;
+}
+
+/**
+ * key = which dimension tile this is. profile = the six-dimension profile.
+ * evidence = deduped display records (buildEvidenceFromRecords output).
+ * records = raw fetched violations (still carry ordernumber, needed only to
+ * find which records belong to Pattern's winning recurring signature -
+ * reuses build_profile's own identification rather than re-guessing it here). */
+function buildDimDetail(key, profile, evidence, records) {
+  let meaning = '', observed = '', rows = [];
+
+  if (key === 'Scale') {
+    meaning = 'How much is currently open — no accounting yet for severity or repeats.';
+    observed = `${profile.active_count} open violation${profile.active_count !== 1 ? 's' : ''} on record right now.`;
+    rows = evidence.slice(0, 3);
+  } else if (key === 'Recency') {
+    meaning = 'Share of open violations filed in just the last year.';
+    rows = evidence.filter(r => r.date && (new Date(r.date) >= new Date(Date.now() - 365 * 86400000)));
+    observed = rows.length
+      ? `${profile.recent_count} of ${profile.active_count} open violations (${Math.round(profile.recency_ratio * 100)}%) were issued in the past year.`
+      : `None of the ${profile.active_count} open violations were issued in the past year — everything here is older.`;
+  } else if (key === 'Severity') {
+    meaning = 'Share of records that are Class C — HPD’s most hazardous tier: heat, hot water, fire, gas.';
+    rows = evidence.filter(r => r.class === 'C');
+    observed = `${profile.class_c_total} of ${profile.active_count} open violations (${Math.round(profile.class_c_rate * 100)}%) are Class C.`;
+  } else if (key === 'Engagement') {
+    meaning = 'Whether the owner’s self-certifications have been accepted or rejected — needs at least 3 attempts before it will judge.';
+    const attempts = profile.accepted_cert + profile.rejected_cert;
+    if (attempts < 3) {
+      observed = 'No certification attempts on record yet — not enough history to judge.';
+      rows = [];
+    } else {
+      observed = `${profile.accepted_cert} accepted, ${profile.rejected_cert} rejected, out of ${attempts} attempts.`;
+      rows = evidence.filter(r => CERT_STATUSES.includes(r.status));
+    }
+  } else if (key === 'Pattern') {
+    meaning = 'Whether one specific problem, in one specific apartment, has come back — not just any two unrelated violations.';
+    if (profile.pattern === 'Isolated' || profile.pattern === 'No real defects' || !profile.top_sig_ordernumber) {
+      observed = profile.pattern === 'Widespread'
+        ? `No recurring signature was found among these violations — every citation traces to a different issue. But there are ${profile.real_defect_count} separate real defects on record, more than the large majority of buildings with no recurring pattern.`
+        : 'No recurring signature was found among these violations — every citation traces to a different issue.';
+      rows = [];
+    } else {
+      const where = profile.top_sig_breadth >= 2 ? `across ${profile.top_sig_breadth} different apartments`
+        : profile.top_sig_breadth === 1 ? 'in the same apartment' : 'in the building’s common areas';
+      observed = `The same defect has recurred ${profile.top_sig_notices} times over ${profile.top_sig_span_years.toFixed(1)} years, ${where}.`;
+      const sigRecords = records.filter(v => v.ordernumber === profile.top_sig_ordernumber);
+      rows = buildEvidenceFromRecords(sigRecords);
+    }
+  } else if (key === 'Backlog age') {
+    meaning = 'Age of the single oldest missed repair deadline still on record.';
+    observed = `The oldest missed deadline is ${profile.max_years_overdue.toFixed(1)} years past due.`;
+    rows = evidence.slice(-1);
+  }
+
+  const shown = rows.slice(0, 3);
+  const evidenceHTML = shown.length
+    ? `<div class="expand-row"><div class="expand-label">Underlying evidence</div>${shown.map(evMiniHTML).join('')}${rows.length > shown.length ? `<div class="ev-more">+${rows.length - shown.length} more</div>` : ''}</div>`
+    : `<div class="expand-row"><div class="expand-label">Underlying evidence</div><div class="expand-body" style="font-style:italic;">Nothing to point to for this one.</div></div>`;
+
+  return `<div class="expand-row"><div class="expand-label">What it measures</div><div class="expand-body">${meaning}</div></div>
+    <div class="expand-row"><div class="expand-label">What we observed</div><div class="expand-body">${observed}</div></div>
+    ${evidenceHTML}`;
+}
+
+function renderDims(profile, evidence, records) {
+  const engagementValue = profile.engagement === 'Untested' ? 'No record yet' : profile.engagement;
+  const dims = [
+    ['Scale', 'How much is there?', `${profile.active_count} active violation${profile.active_count !== 1 ? 's' : ''}`],
+    ['Recency', 'Is it happening now?', profile.recency],
+    ['Severity', 'How serious is it?', profile.severity],
+    ['Engagement', 'Has the owner responded?', engagementValue],
+    ['Pattern', 'Does it keep happening?', profile.pattern],
+    ['Backlog age', 'How long unresolved?', profile.backlog_age],
+  ];
+  const dimsEl = document.getElementById('d-dims');
+  dimsEl.innerHTML = dims.map(([k, q, v]) =>
+    `<div class="dim-card"><span class="dim-chev">&#9662;</span><span class="dim-k">${k}</span><span class="dim-q">${q}</span><span class="dim-v">${v}</span><div class="dim-expand"><div><div class="expand-inner">${buildDimDetail(k, profile, evidence, records)}</div></div></div></div>`
+  ).join('');
+  dimsEl.querySelectorAll('.dim-card').forEach(card => {
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('role', 'button');
+    card.addEventListener('click', () => card.classList.toggle('open'));
+    card.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); card.classList.toggle('open'); } });
+  });
+}
+
+// Pulsating grey placeholders shown the instant a building is selected,
+// while the real per-building narrative/dims are still being fetched live
+// from NYC's API - replaced by renderHeadline()/renderDims() once resolved.
+function renderSkeleton() {
+  document.getElementById('d-narrative').innerHTML =
+    `<div class="skel skel-line" style="width:100%"></div>
+     <div class="skel skel-line" style="width:92%"></div>
+     <div class="skel skel-line" style="width:58%"></div>`;
+  document.getElementById('d-dims').innerHTML = Array.from({ length: 6 }).map(() =>
+    `<div class="dim-card"><div class="skel skel-k"></div><div class="skel skel-v"></div></div>`
+  ).join('');
+}
+
+/** d = the lightweight, batch-computed dot data (position/pattern/scale/neighborhood).
+ * Shows that immediately for instant feedback, then fetches this ONE building's real
+ * records live from NYC's API and replaces the narrative/dims/evidence once it resolves. */
+function showDetail(d) {
+  const myRequestId = ++currentRequestId;
+  markSelected(d);
+  showStory(d.neighborhood, d.boro);
+
+  renderHeadline(d.pattern, d.scale);
+  document.getElementById('d-addr').textContent = d.address;
+  document.getElementById('d-buildingid').textContent = 'BuildingID ' + d.buildingid;
+  renderSkeleton();
+  renderSimilar(d.buildingid, d.pattern, d.neighborhood);
+  document.getElementById('evidence-count').textContent = '';
+  document.getElementById('evidence-table').innerHTML = '';
+
+  const url = `https://data.cityofnewyork.us/resource/csn4-vhvf.json?$where=buildingid='${d.buildingid}'&$limit=5000`;
+  fetch(url)
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
+    .then(records => {
+      if (myRequestId !== currentRequestId) return; // a newer click already superseded this one
+      if (!records.length) {
+        document.getElementById('d-narrative').textContent = 'No live records returned for this building right now.';
+        return;
+      }
+      const profile = buildProfile(d.buildingid, records, new Date());
+      const narrative = generateNarrative(profile);
+      const evidence = buildEvidenceFromRecords(records);
+
+      renderHeadline(profile.pattern, profile.scale);
+      document.getElementById('d-narrative').textContent = narrative;
+      renderDims(profile, evidence, records);
+
+      renderEvidence(evidence);
+    })
+    .catch(err => {
+      if (myRequestId !== currentRequestId) return;
+      document.getElementById('d-narrative').textContent =
+        'Live lookup failed or timed out (NYC\'s API can occasionally be slow) — try clicking this building again.';
+      console.error('Live building lookup failed:', err);
+    });
+}
+
+const INITIAL_VIEW = { center: [-73.97, 40.72], zoom: 8.5, pitch: 0, bearing: 0 }; // matches the map's own init params
+const HOME_VIEW = { center: [-73.97, 40.72], zoom: 10, pitch: 55, bearing: -10 };
+
+// Replays the exact same cinematic entrance as clicking "Explore the map" on
+// the landing screen: snap back to the pre-flyover starting point, then fly
+// in with the same duration - used on real load and whenever the user wants
+// to fully reset (e.g. clearing a selection), instead of a shorter flyTo
+// from wherever the camera happens to be, which reads as an abrupt jump cut.
+function flyInFromStart() {
+  if (!mapRef) return;
+  mapRef.jumpTo(INITIAL_VIEW);
+  mapRef.flyTo({ ...HOME_VIEW, duration: 3500 });
+}
+const BORO_CENTERS = {
+  "MANHATTAN":     { center: [-73.9712, 40.7831], zoom: 12.5 },
+  "BRONX":         { center: [-73.8648, 40.8448], zoom: 11.5 },
+  "BROOKLYN":      { center: [-73.9442, 40.6782], zoom: 11.5 },
+  "QUEENS":        { center: [-73.7949, 40.7282], zoom: 11 },
+  "STATEN ISLAND": { center: [-74.1502, 40.5795], zoom: 11.5 },
+};
+const PATTERN_ORDER = ["No real defects", "Isolated", "Widespread", "Persistent", "Chronic"];
+
+function renderSummary(data) {
+  document.getElementById('panel-title').textContent =
+    `NYC Building Stories — ${data.length.toLocaleString()} buildings analyzed`;
+}
+
+function patternBar(counts, total) {
+  return PATTERN_ORDER.map(p => {
+    const pct = total ? (counts[p] || 0) / total * 100 : 0;
+    const color = PATTERN_COLORS[p];
+    return `<div style="width:${pct}%; background: rgb(${color.join(',')})"></div>`;
+  }).join('');
+}
+
+function renderBoroughs(data, neighborhoods, map) {
+  mapRef = map;
+  neighborhoodsRef = neighborhoods;
+
+  const byBoro = {};
+  for (const d of data) {
+    if (!d.boro) continue;
+    byBoro[d.boro] = byBoro[d.boro] || { "No real defects": 0, Isolated: 0, Widespread: 0, Persistent: 0, Chronic: 0, total: 0 };
+    byBoro[d.boro][d.pattern] = (byBoro[d.boro][d.pattern] || 0) + 1;
+    byBoro[d.boro].total += 1;
+  }
+  const container = document.getElementById('boroughs');
+  container.innerHTML = '';
+  const order = ["BROOKLYN", "BRONX", "QUEENS", "MANHATTAN", "STATEN ISLAND"];
+
+  for (const boro of order) {
+    const c = byBoro[boro];
+    if (!c) continue;
+    const displayName = boro.charAt(0) + boro.slice(1).toLowerCase();
+    const row = document.createElement('div');
+    row.className = 'boro-row';
+    row.innerHTML = `
+      <div class="boro-name"><span>${displayName}</span><span class="n">${c.total}</span></div>
+      <div class="boro-bar">${patternBar(c, c.total)}</div>`;
+
+    const boroNameEl = row.querySelector('.boro-name');
+    row.onclick = () => {
+      selectName(boroNameEl);
+      showNeighborhoodsView(boro);
+    };
+    container.appendChild(row);
+  }
+}
+
+function renderLanding(data) {
+  const counts = { "No real defects": 0, Isolated: 0, Widespread: 0, Persistent: 0, Chronic: 0 };
+  for (const d of data) counts[d.pattern] = (counts[d.pattern] || 0) + 1;
+  document.getElementById('landing-stats').innerHTML = PATTERN_ORDER.map(p => `
+    <div class="stat">
+      <div class="num" style="color: rgb(${PATTERN_COLORS[p].join(',')})">${((counts[p]/data.length)*100).toFixed(1)}%</div>
+      <div class="lbl">${p}</div>
+    </div>`).join('');
+  document.getElementById('landing-legend').innerHTML = PATTERN_ORDER.map(p =>
+    `<span><span class="sw" style="background: rgb(${PATTERN_COLORS[p].join(',')})"></span>${PATTERN_LABELS[p]}</span>`
+  ).join('');
+}
+
+function renderSearch(data, map) {
+  const box = document.getElementById('search-box');
+  const results = document.getElementById('search-results');
+
+  function selectMatch(m) {
+    map.flyTo({ center: [m.lon, m.lat], zoom: 17, pitch: 60, duration: 1800 });
+    showDetail(m);
+    results.classList.remove('open');
+    box.value = m.address;
+  }
+
+  box.addEventListener('input', () => {
+    hideNoMatchWarning();
+    const q = box.value.trim().toUpperCase();
+    results.innerHTML = '';
+    if (q.length < 3) { results.classList.remove('open'); return; }
+    const matches = data.filter(d => d.address.toUpperCase().includes(q)).slice(0, 8);
+    if (!matches.length) { results.classList.remove('open'); return; }
+    results.classList.add('open');
+    for (const m of matches) {
+      const row = document.createElement('div');
+      row.className = 'search-result';
+      row.innerHTML = `<span>${m.address}</span><span class="n" style="color: rgb(${PATTERN_COLORS[m.pattern].join(',')})">${m.pattern}</span>`;
+      row.onclick = () => selectMatch(m);
+      results.appendChild(row);
+    }
+  });
+
+  // Enter jumps straight to the top match (rather than requiring a dropdown
+  // click) - shows a spinner in place of the resting icon while the camera
+  // flies there, or a soft warning if nothing in the loaded sample matches
+  // (which, since this dataset is only buildings with an open violation,
+  // reads as real information: this address has none on record).
+  box.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const q = box.value.trim().toUpperCase();
+    if (q.length < 3) return;
+    const matches = data.filter(d => d.address.toUpperCase().includes(q));
+    if (!matches.length) {
+      showNoMatchWarning();
+      results.classList.remove('open');
+      return;
+    }
+    hideNoMatchWarning();
+    results.classList.remove('open');
+    const m = matches[0];
+    selectMatch(m); // sets the icon to 'pin' as part of normal selection - override below
+    setSearchIcon('loading');
+    map.once('moveend', () => setSearchIcon('pin'));
+  });
+}
+
+// ColumnLayer has no per-object radius accessor (radius is a single uniform
+// value for the whole layer), so per-building sizing is done by splitting
+// buildings into a few footprint-size tiers and rendering one cheap
+// GPU-instanced ColumnLayer per tier, each with its own fixed radius. This
+// keeps rendering performance identical to a single uniform-radius layer
+// while making dense blocks of genuinely small buildings stop overlapping
+// with a single citywide 20m disk size.
+const SIZE_TIERS = 5;
+
+function bucketBySize(data) {
+  const halfWidths = data.map(d => Math.sqrt(d.footprint_m2 || 150) / 2).sort((a, b) => a - b);
+  const edges = [];
+  for (let i = 1; i < SIZE_TIERS; i++) {
+    edges.push(halfWidths[Math.floor((i / SIZE_TIERS) * halfWidths.length)]);
+  }
+  const buckets = Array.from({ length: SIZE_TIERS }, () => []);
+  for (const d of data) {
+    const hw = Math.sqrt(d.footprint_m2 || 150) / 2;
+    let tier = edges.findIndex(edge => hw <= edge);
+    if (tier === -1) tier = SIZE_TIERS - 1;
+    buckets[tier].push({ d, hw });
+  }
+  return buckets.map(bucket => ({
+    data: bucket.map(b => b.d),
+    radius: bucket.length ? bucket.reduce((sum, b) => sum + b.hw, 0) / bucket.length : 10,
+  })).filter(b => b.data.length > 0);
+}
+
+// PLUTO only gives one coordinate per tax lot, but a single lot can carry
+// multiple distinct HPD BuildingIDs (e.g. separate wings/structures on one
+// lot) - those buildings all land on the exact same [lat, lon], so their
+// columns render fully stacked on top of each other. Whichever one wins the
+// GPU depth/color tie-break is what's visually shown, while a click can
+// correctly resolve to a genuinely different one underneath it - looking
+// like a picking bug (marker on one building's color, data for another)
+// when it's really a coordinate collision. Spread colliding buildings out
+// in a small ring so each one gets its own distinct, clickable position.
+function deduplicateOverlappingCoordinates(data) {
+  const groups = {};
+  for (const d of data) {
+    const key = d.lat.toFixed(6) + ',' + d.lon.toFixed(6);
+    (groups[key] = groups[key] || []).push(d);
+  }
+  const metersPerDegLat = 111320;
+  let collisions = 0;
+  let largestGroup = 0;
+  for (const key in groups) {
+    const group = groups[key];
+    if (group.length < 2) continue;
+    collisions += group.length;
+    largestGroup = Math.max(largestGroup, group.length);
+    // A grid reads as "a cluster of buildings" at any size - large superblock
+    // developments (e.g. Co-op City, ~250 BuildingIDs on one PLUTO lot) would
+    // otherwise spiral outward in visibly artificial concentric rings. Spacing
+    // must scale with the group's own largest footprint, not a fixed value -
+    // a fixed 18m spacing badly overlaps (and breaks picking for) buildings
+    // whose footprint alone is 50m across, as several of Co-op City's are.
+    const maxHalfWidth = Math.max(...group.map(d => Math.sqrt(d.footprint_m2 || 150) / 2));
+    const spacing = maxHalfWidth * 2 + 4; // clear gap between grid cells regardless of size
+    const cols = Math.ceil(Math.sqrt(group.length));
+    const rows = Math.ceil(group.length / cols);
+    group.forEach((d, i) => {
+      if (i === 0) return; // first one keeps the real, unmodified coordinate
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const offsetX = (col - (cols - 1) / 2) * spacing;
+      const offsetY = (row - (rows - 1) / 2) * spacing;
+      d.lat += offsetY / metersPerDegLat;
+      d.lon += offsetX / (metersPerDegLat * Math.cos(d.lat * Math.PI / 180));
+    });
+  }
+  if (collisions) console.log(`${collisions} buildings shared a coordinate with at least one other building (largest group: ${largestGroup}); spread apart in a grid for rendering/picking.`);
+}
+
+Promise.all([
+  fetch('data/map_dataset.json').then(r => r.json()),
+  fetch('data/neighborhoods.json').then(r => r.json()),
+])
+  .then(([data, neighborhoods]) => {
+    deduplicateOverlappingCoordinates(data);
+    for (const n of neighborhoods) {
+      NEIGHBORHOODS_BY_NAME[n.neighborhood] = n;
+    }
+    window.__TEST_DATA__ = data; // temporary hook for automated testing
+    document.getElementById('status').innerHTML =
+      `${data.length.toLocaleString()} buildings loaded` +
+      `<span class="status-credit">Data: <a href="http://www.nyc.gov/html/hpd/html/pr/HPD-Open-Data.shtml" target="_blank" rel="noopener">NYC HPD Open Violations</a> &middot; refreshed Aug 14, 2026</span>`;
+    renderSummary(data);
+    renderLanding(data);
+
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+      center: [-73.97, 40.72],
+      zoom: 8.5,
+      pitch: 0,
+      bearing: 0,
+      antialias: true
+    });
+    map.addControl(new maplibregl.NavigationControl(), 'top-right');
+    window.__TEST_MAP__ = map; // temporary hook for automated testing
+    renderBoroughs(data, neighborhoods, map);
+    renderSearch(data, map);
+
+    document.getElementById('landing-enter').onclick = () => {
+      document.getElementById('landing').classList.add('hidden');
+      flyInFromStart();
+    };
+
+    const tooltip = document.getElementById('tooltip');
+
+    const onClick = (info) => {
+      if (!info.object) return;
+      map.flyTo({ center: [info.object.lon, info.object.lat], zoom: 17, pitch: 60, duration: 1800 });
+      showDetail(info.object);
+    };
+    const onHover = (info) => {
+      if (info.object) {
+        tooltip.style.display = 'block';
+        tooltip.style.left = (info.x + 14) + 'px';
+        tooltip.style.top = (info.y + 10) + 'px';
+        tooltip.innerHTML = `<div class="t-addr">${info.object.address}</div><div class="t-pattern">${info.object.pattern} · ${info.object.active_count} active</div>`;
+      } else {
+        tooltip.style.display = 'none';
+      }
+    };
+
+    // Rendering (and, more importantly, deck.gl's GPU picking readback) all
+    // 167k columns at once is the root cause of the documented full-scale
+    // click-picking failures (2026-08-15 log: GPU stall -> no hit; later
+    // observed as a wrong-building hit under similar GPU load). Keeping each
+    // tier's fixed radius (computed from the FULL citywide set, so it never
+    // shifts as you pan) but only feeding the currently-visible subset into
+    // the layer shrinks the picking buffer to roughly what's on screen.
+    const sizeTiers = bucketBySize(data); // [{data: [...], radius}, ...], data = ALL buildings in that tier
+    function buildingsInBounds(arr, b) {
+      return arr.filter(d => d.lon >= b.west && d.lon <= b.east && d.lat >= b.south && d.lat <= b.north);
+    }
+    function updateVisibleBuildings() {
+      const b = map.getBounds();
+      const lonPad = (b.getEast() - b.getWest()) * 0.3; // small pan margin so buildings don't pop in/out abruptly
+      const latPad = (b.getNorth() - b.getSouth()) * 0.3;
+      const padded = {
+        west: b.getWest() - lonPad, east: b.getEast() + lonPad,
+        south: b.getSouth() - latPad, north: b.getNorth() + latPad,
+      };
+      buildingLayers.forEach((layer, i) => {
+        layer.setProps({ data: buildingsInBounds(sizeTiers[i].data, padded) });
+      });
+    }
+
+    buildingLayers = sizeTiers.map((tier, i) => new deck.MapboxLayer({
+      id: 'buildings-' + i,
+      type: deck.ColumnLayer,
+      data: [], // populated by updateVisibleBuildings() once the map has real bounds
+      diskResolution: 4,
+      angle: 45,
+      radius: tier.radius,
+      extruded: true,
+      pickable: true,
+      elevationScale: 8,
+      material: { ambient: 0.35, diffuse: 0.65, shininess: 28, specularColor: [255, 255, 255] },
+      getPosition: d => [d.lon, d.lat],
+      getElevation: d => Math.max(d.floors, 2),
+      getFillColor: d => {
+        const rgb = PATTERN_COLORS[d.pattern] || [120, 120, 120];
+        const inSelection = selectedNeighborhood ? d.neighborhood === selectedNeighborhood
+          : selectedBoro ? d.boro === selectedBoro
+          : true;
+        const inPatternFilter = activePatterns.has(d.pattern);
+        return [...rgb, (inSelection && inPatternFilter) ? 255 : 35];
+      },
+      stroked: true,
+      getLineColor: d => d.buildingid === selectedBuildingId ? [255, 255, 255, 255] : [0, 0, 0, 0],
+      getLineWidth: 1,
+      lineWidthUnits: 'pixels',
+      lineWidthMinPixels: 2,
+      updateTriggers: { getLineColor: selectedBuildingId },
+      onClick,
+      onHover,
+    }));
+
+    selectionPinLayer = new deck.MapboxLayer({
+      id: 'selection-pin',
+      type: deck.IconLayer,
+      data: [],
+      pickable: true,
+      billboard: true, // icon always faces the camera - stays a crisp flat pin, not laid onto the roof
+      getPosition: d => [d.lon, d.lat, d.height],
+      getIcon: () => ({ url: PIN_ICON_URL, width: 24, height: 24, anchorY: 24 }),
+      getSize: 34,
+      sizeUnits: 'pixels',
+      onClick: (info) => { if (info.object) flyToBuilding(info.object); },
+    });
+
+    map.on('load', () => {
+      for (const layer of buildingLayers) map.addLayer(layer);
+      map.addLayer(selectionPinLayer);
+      updateVisibleBuildings();
+
+      // Thin "city limits" line + fading everything outside it (White
+      // Plains, Yonkers, Hackensack, Fort Lee, ...) keeps the map reading
+      // as "NYC and its data" instead of the whole tri-state area.
+      fetch('data/nyc_boundary.geojson').then(r => r.json()).then(boundary => {
+        map.addSource('nyc-boundary', { type: 'geojson', data: boundary });
+        map.addLayer({
+          id: 'nyc-boundary-line',
+          type: 'line',
+          source: 'nyc-boundary',
+          paint: { 'line-color': 'rgba(255,255,255,0.15)', 'line-width': 1 },
+        });
+
+        const suburbLabelLayers = [
+          'place_hamlet', 'place_suburbs', 'place_villages', 'place_town',
+          'place_city_r6', 'place_city_r5', 'place_city_dot_r7', 'place_city_dot_r4',
+          'place_city_dot_r2', 'place_city_dot_z7', 'place_capital_dot_z7',
+        ];
+        const fadeOutsideCity = ['case', ['within', boundary], 1, 0.08];
+        for (const id of suburbLabelLayers) {
+          if (!map.getLayer(id)) continue;
+          map.setPaintProperty(id, 'text-opacity', fadeOutsideCity);
+          map.setPaintProperty(id, 'icon-opacity', fadeOutsideCity);
+        }
+      });
+    });
+    map.on('moveend', updateVisibleBuildings);
+  })
+  .catch(err => {
+    document.getElementById('status').textContent = 'Error loading data: ' + err;
+    console.error(err);
+  });
+</script>
+</body>
+</html>

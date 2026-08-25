@@ -1,0 +1,471 @@
+"""Turns a building's raw HPD violation records into a six-dimension profile
+and an evidence-based narrative sentence.
+
+This is the reusable version of the analysis done ad hoc in
+scripts/phase3_derive_taxonomy.py, and it's the core of the "Building Story
+Engine" from local project notes. Deterministic, rule-based — no ML.
+"""
+import re
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+
+NON_COMPLIANCE_STATUSES = {"NOT COMPLIED WITH", "FALSE CERTIFICATION", "INVALID CERTIFICATION"}
+ACCEPTED_CERT_STATUSES = {"NOV CERTIFIED ON TIME", "NOV CERTIFIED LATE"}
+P90_OVERDUE_DAYS = 9.7 * 365
+P99_OVERDUE_DAYS = 25.2 * 365
+MIN_CERT_ATTEMPTS_FOR_ENGAGEMENT = 3
+# p75 of real_defect_count within the Isolated/Widespread candidate pool
+# (buildings with >=1 real defect and no Persistent/Chronic recurring
+# signature; n=106,669, calibrated via scripts/calibrate_real_defect_count.py
+# against the full citywide dataset). Below this, a building's real-defect
+# count is still typical for that pool; at/above it, a building sits in the
+# top quarter by volume even though nothing has ever recurred - "Isolated"
+# stopped being an honest word for a building with, say, 35 one-off defects.
+REAL_DEFECT_WIDESPREAD_THRESHOLD = 9
+
+# OrderNumbers that represent recurring ADMINISTRATIVE/FILING obligations rather
+# than physical defects. These recur by design (e.g. annually, for every subject
+# building) and would falsely inflate Persistent/Chronic pattern detection if not
+# excluded. Found via Phase 3 testing: 8 of 25 "Persistent" matches in an 80-building
+# sample turned out to be the same annual-filing code (1507). Audited the other top-60
+# codes by citywide frequency (data/ordernumber_counts.json) for the same pattern —
+# high confidence on the first 5, moderate on the last 2 (posting/certification-type
+# obligations that plausibly recur on a compliance calendar, but not as certain as the
+# bedbug report). Not exhaustive — only the top 60 of 396 codes were reviewed.
+ADMINISTRATIVE_ORDERNUMBERS = {
+    "780",   # "OWNER FAILED TO FILE A VALID REGISTRATION STATEMENT" - recurs if unregistered
+    "1507",  # "FILE ANNUAL BEDBUG REPORT" - recurs yearly by design
+    "700",   # "POST A PROPER NOTICE OF SMOKE DETECTOR REQUIREMENTS" - signage, not the device
+    "1501",  # "POST A PROPER NOTICE OF CARBON MONOXIDE DETECTING DEVICE REQUIREMENTS" - signage
+    "778",   # "POST AND MAINTAIN A PROPER SIGN...SHOWING THE REGISTRATION NUMBER" - signage
+    "484",   # "PROVIDE A COMPLETED CERTIFICATE OF INSPECTION VISITS" - MDL S329 posting (moderate confidence)
+    "623",   # "CERTIFY COMPLIANCE WITH LEAD-BASED PAINT HAZARD CONTROL REQUIREMENTS" - Local Law 1 annual cert (moderate confidence)
+}
+
+# Generic legal/administrative boilerplate that shows up in almost every
+# NOVDescription regardless of what's actually broken (code citations, "adm
+# code", "properly repair", etc.) - stripped out before comparing descriptions
+# within a recurring signature, so the comparison is measuring the defect
+# itself, not the shared legal phrasing every notice is wrapped in.
+_DESCRIPTION_STOPWORDS = {
+    "PROPERLY", "REPAIR", "REPLACE", "REMOVE", "MAINTAIN", "PROVIDE", "CLEAN",
+    "CONDITION", "ADM", "CODE", "HMC", "SECTION", "MDL", "LAW", "REQUIRED",
+    "SIMILAR", "MATERIAL", "ACCORDANCE", "DESCRIBED", "NOTICE", "VIOLATION",
+    "BUILDING", "APARTMENT", "LOCATED", "ENTIRE", "WHICH", "THEREFORE",
+    "SUBJECT", "ABATE", "DEFECTIVE", "BROKEN", "STORY", "FRONT", "REAR",
+}
+
+
+def _defect_keywords(desc):
+    """Strip legal boilerplate from a NOVDescription, leaving the words that
+    actually identify what's wrong (e.g. MICE, ROACH, PLASTER, LINTEL)."""
+    if not desc:
+        return set()
+    words = re.findall(r"[A-Z]{4,}", desc.upper())
+    return {w for w in words if w not in _DESCRIPTION_STOPWORDS}
+
+
+def _signature_is_coherent(descriptions):
+    """A recurring signature (same OrderNumber) can mean the same specific
+    defect recurring, or a generic repair code covering many unrelated
+    defects (Finding 10: OrderNumber 502 covering 20 different structural
+    problems at one building, sharing only the legal code, not the defect).
+    Checks whether the descriptions actually share a real defect keyword -
+    if the single most common keyword appears in at least 60% of the
+    distinct descriptions, this reads as one real recurring problem."""
+    distinct = list({d for d in descriptions if d})
+    if len(distinct) <= 1:
+        return True
+    counts = defaultdict(int)
+    for d in distinct:
+        for kw in _defect_keywords(d):
+            counts[kw] += 1
+    if not counts:
+        return False
+    return max(counts.values()) / len(distinct) >= 0.6
+
+
+def _parse_date(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace(".000", ""))
+    except Exception:
+        return None
+
+
+@dataclass
+class BuildingProfile:
+    buildingid: str
+    address: str
+    active_count: int
+    real_defect_count: int
+    recent_count: int
+    recency_ratio: float
+    class_c_total: int
+    class_c_recent: int
+    class_c_rate: float
+    non_compliance_total: int
+    non_compliance_recent: int
+    accepted_cert: int
+    rejected_cert: int
+    cert_acceptance_rate: float | None
+    max_days_overdue: int
+    max_years_overdue: float
+    top_sig_notices: int
+    top_sig_span_years: float
+    top_sig_breadth: int          # distinct apartments the winning signature touched (0 = common-area only)
+    top_sig_coherent: bool        # False = generic code covering several different defects, not one recurring problem
+    top_sig_ordernumber: str | None  # OrderNumber of the winning signature - lets the UI pull its actual records instead of re-guessing which ones they are
+    n_persistent_sigs: int
+    n_chronic_sigs: int
+    n_defect_visits: int          # distinct dates a real (non-admin) defect was cited, any ordernumber
+    defect_visit_span_years: float
+
+    # Assigned dimension levels
+    scale: str = ""
+    recency: str = ""
+    severity: str = ""
+    engagement: str = ""
+    pattern: str = ""
+    backlog_age: str = ""
+    long_unresolved: bool = False
+
+
+def _level_scale(n):
+    if n <= 3:
+        return "Minimal"
+    if n <= 7:
+        return "Low"
+    if n <= 18:
+        return "Moderate"
+    if n <= 66:
+        return "Large"
+    return "Severe"
+
+
+def _level_recency(ratio):
+    if ratio < 0.15:
+        return "Dormant"
+    if ratio <= 0.70:
+        return "Mixed"
+    return "Active surge"
+
+
+def _level_severity(rate):
+    if rate < 0.10:
+        return "Low"
+    if rate <= 0.30:
+        return "Elevated"
+    if rate <= 0.70:
+        return "Severe"
+    return "Extreme"
+
+
+def _level_engagement(accepted, rejected):
+    attempts = accepted + rejected
+    if attempts < MIN_CERT_ATTEMPTS_FOR_ENGAGEMENT:
+        # Zero attempts: genuinely untested. 1-2 attempts: too little evidence
+        # for a confident behavioral claim, even though technically non-zero.
+        return "Untested"
+    rate = accepted / attempts
+    if rate < 0.30:
+        return "Resistant"
+    if rate <= 0.70:
+        return "Mixed engagement"
+    return "Responsive"
+
+
+def _level_pattern(n_persistent, n_chronic, real_defect_count):
+    if n_chronic > 0:
+        return "Chronic"
+    if n_persistent > 0:
+        return "Persistent"
+    if real_defect_count == 0:
+        # Finding 1: ~1 in 5 buildings citywide have violations on file that
+        # are entirely administrative (bedbug filings, registration lapses)
+        # with no physical defect ever cited. Distinct from an ordinary
+        # Isolated building with one small real problem - same bucket today,
+        # different reality.
+        return "No real defects"
+    if real_defect_count >= REAL_DEFECT_WIDESPREAD_THRESHOLD:
+        # A building can rack up dozens of never-repeating real defects and
+        # still pass every recurrence check - "Isolated" (a word that reads
+        # as "one thing happened") shouldn't cover that. Split purely on
+        # volume; severity is already its own dimension, not folded in here.
+        return "Widespread"
+    return "Isolated"
+
+
+def _level_backlog(days):
+    years = days / 365
+    if years < 2:
+        return "Current"
+    if years <= 9.7:
+        return "Aging"
+    if years <= 25:
+        return "Very aged"
+    return "Extreme"
+
+
+def build_profile(buildingid: str, violations: list[dict], today: datetime) -> BuildingProfile:
+    """Compute the six-dimension profile for one building from its raw violation rows."""
+    seen = set()
+    deduped = []
+    for v in violations:
+        key = (v.get("apartment"), v.get("novdescription"), v.get("novissueddate"))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(v)
+
+    addr = f"{violations[0].get('housenumber','')} {violations[0].get('streetname','')}, {violations[0].get('boro','')}"
+    active_count = len(deduped)
+    real_defect_count = sum(1 for v in deduped if v.get("ordernumber") not in ADMINISTRATIVE_ORDERNUMBERS)
+
+    recent_count = class_c_recent = class_c_total = 0
+    non_compliance_total = non_compliance_recent = 0
+    accepted_cert = rejected_cert = 0
+    max_days_overdue = 0
+    # Building-wide signatures (same OrderNumber, ANY apartment) - not
+    # apartment-scoped. Finding 2: apartment-only grouping structurally can't
+    # see a defect recurring across different units at the same building
+    # (e.g. a mice infestation cited in 9 different apartments over 7 years),
+    # and building-wide recurrence is a strict superset of apartment-only
+    # (verified: no building ever downgrades under this change), so it
+    # replaces apartment-scoped grouping entirely rather than sitting beside it.
+    signatures = defaultdict(dict)          # ordernumber -> {novid: nov_date}
+    sig_apartments = defaultdict(set)       # ordernumber -> {apartments touched}
+    sig_descriptions = defaultdict(dict)    # ordernumber -> {novid: description}
+    # Distinct calendar dates a REAL defect was cited, regardless of whether
+    # it was the same ordernumber recurring - captures a building that keeps
+    # getting hit with a *different* problem at nearly every inspection
+    # (Finding: 588 Gates Ave / 713 Tilden St), which the signature-based
+    # pattern logic above can't see since it only tracks same-code recurrence.
+    defect_visit_dates = set()
+
+    for v in deduped:
+        nov_date = _parse_date(v.get("novissueddate"))
+        cls = v.get("class")
+        status = v.get("currentstatus")
+        is_recent = bool(nov_date and (today - nov_date).days <= 365)
+
+        if is_recent:
+            recent_count += 1
+            if cls == "C":
+                class_c_recent += 1
+            if status in NON_COMPLIANCE_STATUSES:
+                non_compliance_recent += 1
+        if cls == "C":
+            class_c_total += 1
+        if status in NON_COMPLIANCE_STATUSES:
+            non_compliance_total += 1
+        if status in ACCEPTED_CERT_STATUSES:
+            accepted_cert += 1
+        if status in ("FALSE CERTIFICATION", "INVALID CERTIFICATION"):
+            rejected_cert += 1
+
+        deadline = _parse_date(v.get("newcorrectbydate")) or _parse_date(v.get("originalcorrectbydate"))
+        # Finding 7: a violation the owner already certified fixed (even
+        # years late) isn't a currently-outstanding deadline - counting it
+        # toward backlog age is how a 2008 record reads as "18 years overdue"
+        # today. Only uncertified violations can push this number.
+        if deadline and deadline < today and status not in ACCEPTED_CERT_STATUSES:
+            max_days_overdue = max(max_days_overdue, (today - deadline).days)
+
+        ordernumber = v.get("ordernumber")
+        novid = v.get("novid")
+        if nov_date and ordernumber not in ADMINISTRATIVE_ORDERNUMBERS:
+            defect_visit_dates.add(nov_date.date())
+        if nov_date and novid and ordernumber not in ADMINISTRATIVE_ORDERNUMBERS:
+            if novid not in signatures[ordernumber] or nov_date < signatures[ordernumber][novid]:
+                signatures[ordernumber][novid] = nov_date
+                sig_descriptions[ordernumber][novid] = v.get("novdescription")
+            apt = v.get("apartment")
+            if apt:
+                sig_apartments[ordernumber].add(apt)
+
+    recurring_sigs = []
+    for ordernumber, novid_dates in signatures.items():
+        dates = list(novid_dates.values())
+        if len(dates) >= 2:
+            span_years = (max(dates) - min(dates)).days / 365
+            breadth = len(sig_apartments[ordernumber])
+            coherent = _signature_is_coherent(list(sig_descriptions[ordernumber].values()))
+            recurring_sigs.append((len(dates), span_years, breadth, coherent, ordernumber))
+    recurring_sigs.sort(key=lambda x: -x[0])
+
+    top_sig_notices, top_sig_span, top_sig_breadth, top_sig_coherent, top_sig_ordernumber = (
+        recurring_sigs[0] if recurring_sigs else (0, 0.0, 0, True, None)
+    )
+    n_persistent = sum(1 for n, s, *_ in recurring_sigs if n >= 3 and s >= 2)
+    n_chronic = sum(1 for n, s, *_ in recurring_sigs if n >= 10 and s >= 5)
+    cert_attempts = accepted_cert + rejected_cert
+
+    n_defect_visits = len(defect_visit_dates)
+    defect_visit_span_years = (
+        (max(defect_visit_dates) - min(defect_visit_dates)).days / 365
+        if n_defect_visits >= 2 else 0.0
+    )
+
+    p = BuildingProfile(
+        buildingid=buildingid,
+        address=addr,
+        active_count=active_count,
+        real_defect_count=real_defect_count,
+        recent_count=recent_count,
+        recency_ratio=(recent_count / active_count) if active_count else 0.0,
+        class_c_total=class_c_total,
+        class_c_recent=class_c_recent,
+        class_c_rate=(class_c_total / active_count) if active_count else 0.0,
+        non_compliance_total=non_compliance_total,
+        non_compliance_recent=non_compliance_recent,
+        accepted_cert=accepted_cert,
+        rejected_cert=rejected_cert,
+        cert_acceptance_rate=(accepted_cert / cert_attempts) if cert_attempts else None,
+        max_days_overdue=max_days_overdue,
+        max_years_overdue=max_days_overdue / 365,
+        top_sig_notices=top_sig_notices,
+        top_sig_span_years=top_sig_span,
+        top_sig_breadth=top_sig_breadth,
+        top_sig_coherent=top_sig_coherent,
+        top_sig_ordernumber=top_sig_ordernumber,
+        n_persistent_sigs=n_persistent,
+        n_chronic_sigs=n_chronic,
+        n_defect_visits=n_defect_visits,
+        defect_visit_span_years=defect_visit_span_years,
+    )
+    p.scale = _level_scale(p.active_count)
+    p.recency = _level_recency(p.recency_ratio)
+    p.severity = _level_severity(p.class_c_rate)
+    p.engagement = _level_engagement(p.accepted_cert, p.rejected_cert)
+    p.pattern = _level_pattern(p.n_persistent_sigs, p.n_chronic_sigs, p.real_defect_count)
+    p.backlog_age = _level_backlog(p.max_days_overdue)
+    # Independent of pattern (recurrence): true when nobody has ever engaged
+    # with the violation, nothing's happened lately, and it's been overdue
+    # for 9.7+ years. Deliberately not folded into `pattern` - it can be true
+    # alongside Chronic/Persistent just as easily as Isolated (the same
+    # recurring defect can also be one nobody's ever certified or revisited).
+    p.long_unresolved = (
+        p.recency == "Dormant"
+        and p.engagement == "Untested"
+        and p.backlog_age in ("Very aged", "Extreme")
+    )
+    return p
+
+
+def generate_narrative(p: BuildingProfile) -> str:
+    """Assemble an evidence-based sentence from the six dimension values.
+    Every clause traces to a specific field on the profile — no characterization
+    of the building or owner, only what the records show."""
+    parts = []
+
+    # Scale + recency + severity opener
+    if p.recency == "Active surge":
+        if p.active_count == 1:
+            opener = "The one violation on file was issued in the past year"
+        else:
+            if p.recency_ratio >= 0.98:
+                recency_phrase = "all issued in the past year"
+            elif p.recency_ratio >= 0.90:
+                recency_phrase = f"nearly all ({p.recent_count} of {p.active_count}) issued in the past year"
+            else:
+                recency_phrase = f"the large majority ({p.recent_count} of {p.active_count}) issued in the past year"
+            opener = f"A wave of {p.active_count} violations, {recency_phrase}"
+    elif p.recency == "Dormant":
+        opener = f"{p.active_count} open violation{'s' if p.active_count != 1 else ''}, with little to no activity in the past year"
+    else:
+        opener = f"{p.active_count} open violations, {p.recent_count} of them issued in the past year"
+    if p.class_c_total > 0:
+        opener += f", {p.class_c_total} of them serious (Class C)"
+    parts.append(opener + ".")
+
+    if p.pattern == "No real defects":
+        parts.append(
+            "None of these are physical defect records — every one is an administrative "
+            "filing requirement (such as registration or bedbug-report compliance), not a "
+            "cited problem with the building itself."
+        )
+    elif p.pattern == "Isolated" and p.real_defect_count < p.active_count:
+        # active_count includes administrative filings (registration lapses,
+        # bedbug reports); the Isolated label is decided on real_defect_count
+        # alone. Without this, a building can show e.g. "11 open violations"
+        # and "Isolated" with nothing explaining why 11 didn't earn Widespread -
+        # the same kind of hidden-number confusion this whole taxonomy pass
+        # was meant to remove, just from the administrative side instead of
+        # the volume side.
+        admin_count = p.active_count - p.real_defect_count
+        parts.append(
+            f"{admin_count} of these are administrative filings, and only "
+            f"{p.real_defect_count} real physical defects are on record."
+        )
+
+    # A building can be Isolated/Widespread (no single defect ever recurred)
+    # and still keep getting hit with a *different* real problem at nearly
+    # every inspection - the signature-recurrence check above can't see
+    # that, since it only tracks the same ordernumber repeating. Widespread
+    # additionally earns a volume comparison ("more than most buildings ever
+    # see") - true by construction, since Widespread only fires at/above the
+    # calibrated p75 cutoff (REAL_DEFECT_WIDESPREAD_THRESHOLD). That claim
+    # would be FALSE for an Isolated building, which sits at or below that
+    # same cutoff, so it's deliberately never made there.
+    has_visit_detail = p.n_defect_visits >= 3 and p.defect_visit_span_years >= 0.5
+    if p.pattern == "Widespread":
+        if has_visit_detail:
+            parts.append(
+                f"None of these problems have repeated, but different issues have been cited "
+                f"across {p.n_defect_visits} separate inspections over {p.defect_visit_span_years:.1f} "
+                "years, more than most buildings ever see."
+            )
+        else:
+            parts.append(
+                f"None of these problems have repeated, but {p.real_defect_count} separate real "
+                "defects are on record here, more than most buildings ever see."
+            )
+    elif p.pattern == "Isolated" and has_visit_detail:
+        parts.append(
+            f"Different problems have been cited across {p.n_defect_visits} separate inspections "
+            f"over {p.defect_visit_span_years:.1f} years, even though no single defect has recurred."
+        )
+
+    # Pattern
+    if p.pattern in ("Chronic", "Persistent"):
+        if p.top_sig_breadth >= 2:
+            where = f"across {p.top_sig_breadth} different apartments"
+        elif p.top_sig_breadth == 1:
+            where = "in the same apartment"
+        else:
+            where = "in the building's common areas"
+        if p.top_sig_coherent:
+            what = "The same specific problem"
+        else:
+            what = "The same administrative code — covering several different underlying defects —"
+        parts.append(
+            f"{what} has recurred {p.top_sig_notices} times over "
+            f"{p.top_sig_span_years:.1f} years, {where}."
+        )
+
+    # Engagement
+    if p.engagement == "Untested":
+        if p.non_compliance_total > 0:
+            parts.append("No certifications have been accepted or rejected on record, though some violations show non-compliance status.")
+        else:
+            parts.append("No certification has ever been attempted for any of these violations.")
+    elif p.engagement == "Responsive":
+        parts.append(f"Every certification attempt on record has been accepted ({p.accepted_cert} of {p.accepted_cert + p.rejected_cert}).")
+    elif p.engagement == "Resistant":
+        parts.append(f"Certification attempts have mostly been rejected ({p.rejected_cert} of {p.accepted_cert + p.rejected_cert} on record).")
+    elif p.engagement == "Mixed engagement":
+        parts.append(f"Certification attempts have had mixed outcomes ({p.accepted_cert} accepted, {p.rejected_cert} rejected).")
+
+    # Backlog age. Deliberately one sentence regardless of long_unresolved -
+    # that flag requires Dormant recency and Untested engagement by
+    # definition, both of which the opener and Engagement sentence above
+    # have *already* stated by the time this runs, in whatever wording their
+    # own branch used. A long_unresolved-specific variant here inevitably
+    # re-says one of those facts in different words no matter how it's
+    # phrased - that's what kept resurfacing as "yet another" duplicate.
+    if p.backlog_age in ("Very aged", "Extreme"):
+        parts.append(f"The oldest outstanding violation is {p.max_years_overdue:.1f} years past its correction deadline.")
+
+    return " ".join(parts)
