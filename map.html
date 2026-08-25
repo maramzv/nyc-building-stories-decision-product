@@ -206,6 +206,7 @@
   .ev-row .ev-desc { color: #c4c7d1; line-height: 1.4; }
   #evidence-more { font-size: 10.5px; color: #666c7c; padding-top: 6px; text-align: center; }
   #d-buildingid { font-size: 10.5px; color: #666c7c; margin-top: 12px; text-align: center; }
+  #d-report-link:hover { color: #fff; }
   #status { position: absolute; bottom: 34px; right: 8px; color: #9aa1b2; font-size: 11px; background: rgba(20,22,30,0.8); padding: 6px 10px; border-radius: 6px; z-index: 2; text-align: right; }
   #status .status-credit { display: block; margin-top: 3px; font-size: 9.5px; color: #666c7c; line-height: 1.35; }
   #status .status-credit a { color: #767c8c; }
@@ -290,6 +291,7 @@
         <div class="similar" id="d-similar"></div>
         <div id="evidence-toggle">Why we're saying this &rarr; <span id="evidence-count"></span></div>
         <div id="evidence-table"></div>
+        <a id="d-report-link" href="#" style="display:block; text-align:center; margin-top:14px; padding-top:12px; border-top:1px solid #333747; font-size:12px; color:#9aa1b2; text-decoration:none;">View full decision report &rarr;</a>
         <div id="d-buildingid"></div>
       </div>
     </div>
@@ -878,6 +880,8 @@ function showDetail(d) {
   renderHeadline(d.pattern, d.scale);
   document.getElementById('d-addr').textContent = d.address;
   document.getElementById('d-buildingid').textContent = 'BuildingID ' + d.buildingid;
+  document.getElementById('d-report-link').href =
+    `report.html?buildingid=${encodeURIComponent(d.buildingid)}&address=${encodeURIComponent(d.address)}&neighborhood=${encodeURIComponent(d.neighborhood)}&boro=${encodeURIComponent(d.boro)}`;
   renderSkeleton();
   renderSimilar(d.buildingid, d.pattern, d.neighborhood);
   document.getElementById('evidence-count').textContent = '';

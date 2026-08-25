@@ -19,13 +19,36 @@ All of it copied over working and already verified — nothing here is a fresh s
 
 ## The user
 
-Not yet defined — this is the first thing to decide before building anything new.
+A prospective tenant or buyer, triaging one building at a time — deciding
+whether to sign a lease or make an offer, informed by that building's real
+violation history and how it compares to its neighborhood, borough, and
+the city as a whole.
+
+## The product
+
+A report-style, search-first product — not the 3D map. A tenant/buyer's
+question ("should I take this apartment?") is a document interaction
+(search, read, compare, decide), not a map interaction, so the map is now
+a secondary/optional page rather than the homepage.
+
+- `index.html` — home page: address search or neighborhood browsing, plus
+  a citywide summary strip.
+- `report.html` — a single building's decision report: the evidence-based
+  narrative, calibrated "worth extra caution" flags, each of the six
+  dimensions translated into plain language with a concrete question to
+  ask the landlord/seller, and a comparison of this building's pattern
+  against its neighborhood/borough/citywide distribution. No score.
+- `neighborhood.html` / `borough.html` / `citywide.html` — the same kind
+  of comparison, one level up at a time, so a "Chronic" label can be read
+  against what's actually typical for that block, borough, or city.
+- `map.html` — the original 3D map, kept as a secondary way to explore,
+  linked to from the home page.
 
 ## Current state
 
-Inherited: a working, evidence-verified story engine and visualization at full city scale.
-
-Not yet started: the decision layer itself — who this is for, what decision they're making, and what "helping them decide" actually means on top of the patterns already computed.
+Inherited: a working, evidence-verified story engine and visualization at
+full city scale. Built on top of it: the report-style decision product
+described above. See `docs/BUILD_LOG.md` for the running build log.
 
 ## Data source
 
@@ -49,8 +72,14 @@ Copy `.env.example` to `.env` and paste a Socrata app token if you plan to re-ru
 ## Project structure
 
 ```
-data/      batch-computed datasets the map reads directly
-scripts/   data pipeline, calibration, and verification scripts
-src/       shared story-engine code (Python + JS port)
-map.html   the visualization
+data/          batch-computed datasets the map/report pages read directly
+scripts/       data pipeline, calibration, and verification scripts
+src/           shared engine code — building_story (Python + JS port),
+               decision_layer.js (tenant framing), aggregate.js (rollups)
+styles/        shared CSS for the report-style pages
+docs/          build log and saved chat transcripts
+index.html     home page — address search + neighborhood browsing
+report.html    single-building decision report
+neighborhood.html / borough.html / citywide.html   comparison views
+map.html       the original 3D map (secondary)
 ```

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neighborhood Report — NYC Building Stories</title>
+<link rel="stylesheet" href="styles/report.css">
+<script src="src/aggregate.js"></script>
+</head>
+<body>
+<div class="page" id="page">
+  <div class="crumbs" id="crumbs"><a href="index.html">Citywide</a></div>
+  <div id="content"><div class="loading">Loading neighborhood record…</div></div>
+</div>
+
+<script>
+const PATTERN_COLORS = {
+  "No real defects": [80, 170, 70],
+  "Isolated":   [64, 216, 200],
+  "Widespread": [66, 133, 224],
+  "Persistent": [230, 180, 60],
+  "Chronic":    [220, 70, 60],
+};
+const PATTERN_LABELS = { "No real defects": "No real defects", "Isolated": "Isolated", "Widespread": "Widespread", "Persistent": "Persistent", "Chronic": "Chronic" };
+const PATTERN_RANK = { "Chronic": 4, "Persistent": 3, "Widespread": 2, "Isolated": 1, "No real defects": 0 };
+const LIST_PAGE = 25;
+
+function qs(name) { return new URLSearchParams(location.search).get(name); }
+function rgb(pattern) { return `rgb(${(PATTERN_COLORS[pattern] || [120,120,120]).join(',')})`; }
+function boroDisplay(b) { return b ? b.charAt(0) + b.slice(1).toLowerCase() : b; }
+
+function distributionHTML(counts) {
+  const dist = patternDistribution(counts);
+  const bar = PATTERN_ORDER.map(p => `<div style="width:${dist[p]}%; background:${rgb(p)}"></div>`).join('');
+  const legend = PATTERN_ORDER.map(p =>
+    `<span><span class="sw" style="background:${rgb(p)}"></span>${PATTERN_LABELS[p]}<span class="pct">${dist[p]}%</span></span>`
+  ).join('');
+  return `<div class="dist-bar">${bar}</div><div class="dist-legend">${legend}</div>`;
+}
+
+function buildingRowHTML(b) {
+  return `<a class="list-row" href="report.html?buildingid=${encodeURIComponent(b.buildingid)}&address=${encodeURIComponent(b.address)}&neighborhood=${encodeURIComponent(b.neighborhood)}&boro=${encodeURIComponent(b.boro)}">
+    <div><div class="list-main">${b.address}</div><div class="list-sub">${b.scale} scale${b.long_unresolved ? ' · long unresolved' : ''}</div></div>
+    <div class="list-tag" style="color:${rgb(b.pattern)}">${b.pattern}</div>
+  </a>`;
+}
+
+async function main() {
+  const name = qs('name');
+  if (!name) {
+    document.getElementById('content').innerHTML = `<div class="empty">No neighborhood specified. <a class="btn-link" href="index.html">← Home</a></div>`;
+    return;
+  }
+
+  const [neighborhoods, mapData] = await Promise.all([
+    fetch('data/neighborhoods.json').then(r => r.json()),
+    fetch('data/map_dataset.json').then(r => r.json()),
+  ]);
+
+  const n = neighborhoods.find(x => x.neighborhood === name);
+  if (!n) {
+    document.getElementById('content').innerHTML = `<div class="empty">Neighborhood not found. <a class="btn-link" href="index.html">← Home</a></div>`;
+    return;
+  }
+
+  document.getElementById('crumbs').innerHTML =
+    `<a href="index.html">Citywide</a><span class="sep">›</span><a href="borough.html?name=${encodeURIComponent(n.boro)}">${boroDisplay(n.boro)}</a><span class="sep">›</span><span class="current">${n.neighborhood}</span>`;
+
+  const nCounts = neighborhoodCounts(n);
+  const boroC = boroRollup(neighborhoods, n.boro);
+  const cityC = citywideRollup(neighborhoods);
+
+  let buildings = mapData.filter(d => d.neighborhood === n.neighborhood && d.boro === n.boro);
+  buildings.sort((a, b) => (PATTERN_RANK[b.pattern] - PATTERN_RANK[a.pattern]) || (a.address < b.address ? -1 : 1));
+
+  let shown = LIST_PAGE;
+
+  function renderList() {
+    const visible = buildings.slice(0, shown);
+    document.getElementById('building-list').innerHTML = visible.map(buildingRowHTML).join('');
+    const moreEl = document.getElementById('building-more');
+    if (buildings.length > shown) {
+      moreEl.innerHTML = `<a class="btn-link" id="show-more">Show ${Math.min(LIST_PAGE, buildings.length - shown)} more (${buildings.length - shown} remaining)</a>`;
+      document.getElementById('show-more').onclick = () => { shown += LIST_PAGE; renderList(); };
+    } else {
+      moreEl.innerHTML = '';
+    }
+  }
+
+  document.getElementById('content').innerHTML = `
+    <div class="card">
+      <div class="hero"><h1>${n.neighborhood}</h1></div>
+      <div class="sub">${boroDisplay(n.boro)} · ${n.total.toLocaleString()} buildings analyzed</div>
+    </div>
+
+    <div class="card">
+      <h2>Pattern distribution</h2>
+      <div class="compare-row"><div class="compare-label">${n.neighborhood}</div></div>
+      ${distributionHTML(nCounts)}
+      <div style="height:10px"></div>
+      <div class="compare-row"><div class="compare-label">${boroDisplay(n.boro)} (borough)</div></div>
+      ${distributionHTML(boroC)}
+      <div style="height:10px"></div>
+      <div class="compare-row"><div class="compare-label">Citywide</div></div>
+      ${distributionHTML(cityC)}
+      <div class="compare-row" style="margin-top:6px;"><div class="compare-label">Long-unresolved violations</div><div class="compare-vals"><span>${n.long_unresolved.toLocaleString()} of ${n.total.toLocaleString()} buildings</span></div></div>
+    </div>
+
+    <div class="card">
+      <h2>Buildings in ${n.neighborhood}</h2>
+      <div id="building-list"></div>
+      <div class="list-more" id="building-more"></div>
+    </div>`;
+
+  renderList();
+}
+
+main().catch(err => {
+  console.error('Neighborhood report failed:', err);
+  document.getElementById('content').innerHTML = `<div class="empty">Something went wrong loading this neighborhood. Try reloading.</div>`;
+});
+</script>
+</body>
+</html>

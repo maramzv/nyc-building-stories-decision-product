@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NYC Building Stories — Decision Product</title>
+<link rel="stylesheet" href="styles/report.css">
+</head>
+<body>
+<div class="page" id="page">
+  <div class="card" style="text-align:center; padding: 28px 24px;">
+    <div class="hero" style="justify-content:center;"><h1 style="font-size:26px;">What should you know before you decide?</h1></div>
+    <div class="sub">Look up a real NYC address, or browse a neighborhood, and get an evidence-backed reading of its housing-violation history — plain-language, with questions to ask, not a score.</div>
+  </div>
+
+  <div class="card">
+    <h2>Look up an address</h2>
+    <div class="search-wrap">
+      <input class="search-box" id="search-box" type="text" placeholder="Search for an address..." autocomplete="off">
+      <div class="search-results" id="search-results"></div>
+    </div>
+    <div class="empty" id="search-empty" style="display:none; padding: 10px 0 0;">No open violations on record for this address.</div>
+  </div>
+
+  <div class="card">
+    <h2>Citywide, at a glance</h2>
+    <div id="citywide-strip"><div class="loading">Loading…</div></div>
+    <div style="text-align:right; margin-top:10px;"><a class="btn-link" href="citywide.html">Full citywide report →</a></div>
+  </div>
+
+  <div class="card">
+    <h2>Browse by neighborhood</h2>
+    <div id="boro-tabs" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;"></div>
+    <div id="nbhd-browse"><div class="loading">Loading…</div></div>
+  </div>
+
+  <div style="text-align:center; margin: 24px 0;">
+    <a class="btn-link" href="map.html">Prefer to explore visually? Open the interactive 3D map →</a>
+  </div>
+</div>
+
+<script src="src/aggregate.js"></script>
+<script>
+const PATTERN_COLORS = {
+  "No real defects": [80, 170, 70],
+  "Isolated":   [64, 216, 200],
+  "Widespread": [66, 133, 224],
+  "Persistent": [230, 180, 60],
+  "Chronic":    [220, 70, 60],
+};
+const PATTERN_LABELS = { "No real defects": "No real defects", "Isolated": "Isolated", "Widespread": "Widespread", "Persistent": "Persistent", "Chronic": "Chronic" };
+const BOROS = ["MANHATTAN", "BROOKLYN", "QUEENS", "BRONX", "STATEN ISLAND"];
+
+function rgb(pattern) { return `rgb(${(PATTERN_COLORS[pattern] || [120,120,120]).join(',')})`; }
+function boroDisplay(b) { return b ? b.charAt(0) + b.slice(1).toLowerCase() : b; }
+
+function distributionHTML(counts) {
+  const dist = patternDistribution(counts);
+  const bar = PATTERN_ORDER.map(p => `<div style="width:${dist[p]}%; background:${rgb(p)}"></div>`).join('');
+  const legend = PATTERN_ORDER.map(p =>
+    `<span><span class="sw" style="background:${rgb(p)}"></span>${PATTERN_LABELS[p]}<span class="pct">${dist[p]}%</span></span>`
+  ).join('');
+  return `<div class="dist-bar">${bar}</div><div class="dist-legend">${legend}</div>`;
+}
+
+let mapData = [];
+let neighborhoods = [];
+let activeBoro = null;
+
+function reportLink(d) {
+  return `report.html?buildingid=${encodeURIComponent(d.buildingid)}&address=${encodeURIComponent(d.address)}&neighborhood=${encodeURIComponent(d.neighborhood)}&boro=${encodeURIComponent(d.boro)}`;
+}
+
+function renderSearch(query) {
+  const resultsEl = document.getElementById('search-results');
+  const emptyEl = document.getElementById('search-empty');
+  if (!query) { resultsEl.classList.remove('open'); resultsEl.innerHTML = ''; emptyEl.style.display = 'none'; return; }
+  const q = query.toUpperCase();
+  const matches = mapData.filter(d => d.address.toUpperCase().includes(q)).slice(0, 12);
+  if (!matches.length) {
+    resultsEl.classList.remove('open'); resultsEl.innerHTML = '';
+    emptyEl.style.display = 'block';
+    return;
+  }
+  emptyEl.style.display = 'none';
+  resultsEl.innerHTML = matches.map(d =>
+    `<div class="search-result" data-href="${reportLink(d)}"><span>${d.address}</span><span style="color:${rgb(d.pattern)}">${d.pattern}</span></div>`
+  ).join('');
+  resultsEl.classList.add('open');
+  resultsEl.querySelectorAll('.search-result').forEach(el => {
+    el.onclick = () => { location.href = el.dataset.href; };
+  });
+}
+
+function renderCitywideStrip() {
+  const c = citywideRollup(neighborhoods);
+  document.getElementById('citywide-strip').innerHTML = `<div class="sub" style="margin-bottom:10px;">${c.total.toLocaleString()} buildings analyzed citywide</div>${distributionHTML(c)}`;
+}
+
+function renderNbhdBrowse() {
+  const tabsEl = document.getElementById('boro-tabs');
+  tabsEl.innerHTML = ['All', ...BOROS].map(b => {
+    const isActive = (b === 'All' && !activeBoro) || b === activeBoro;
+    return `<span class="pattern-badge" data-boro="${b === 'All' ? '' : b}" style="cursor:pointer; ${isActive ? 'border-color:#fff;' : ''}">${b === 'All' ? 'All' : boroDisplay(b)}</span>`;
+  }).join('');
+  tabsEl.querySelectorAll('[data-boro]').forEach(el => {
+    el.onclick = () => { activeBoro = el.dataset.boro || null; renderNbhdBrowse(); };
+  });
+
+  const list = (activeBoro ? neighborhoods.filter(n => n.boro === activeBoro) : neighborhoods)
+    .slice().sort((a, b) => b.total - a.total).slice(0, 30);
+  document.getElementById('nbhd-browse').innerHTML = list.map(n => `
+    <a class="list-row" href="neighborhood.html?name=${encodeURIComponent(n.neighborhood)}">
+      <div><div class="list-main">${n.neighborhood}</div><div class="list-sub">${boroDisplay(n.boro)} · ${n.total.toLocaleString()} buildings</div></div>
+      <div class="list-tag" style="color:${rgb(n.chronic > 0 ? 'Chronic' : 'Isolated')}">${n.chronic} chronic</div>
+    </a>`).join('');
+}
+
+document.getElementById('search-box').addEventListener('input', e => renderSearch(e.target.value.trim()));
+
+Promise.all([
+  fetch('data/map_dataset.json').then(r => r.json()),
+  fetch('data/neighborhoods.json').then(r => r.json()),
+]).then(([md, nd]) => {
+  mapData = md;
+  neighborhoods = nd;
+  renderCitywideStrip();
+  renderNbhdBrowse();
+}).catch(err => {
+  console.error('Home page data load failed:', err);
+  document.getElementById('citywide-strip').innerHTML = `<div class="empty">Could not load citywide data.</div>`;
+  document.getElementById('nbhd-browse').innerHTML = `<div class="empty">Could not load neighborhood data.</div>`;
+});
+</script>
+</body>
+</html>

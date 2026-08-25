@@ -69,18 +69,28 @@ same discipline into whatever gets built here.
 
 ## Where we left off
 
-Mid-conversation on scoping this project's actual decision layer. Two
-questions on the table:
+**Resolved (2026-08-25):** the user is a prospective tenant/buyer,
+triaging one building at a time — the option previously recommended here
+(reasoning preserved below). Building on that, the product also turned
+out *not* to be map-first: the 3D map was built for the prior project's
+job (exploring city-scale patterns visually), which is a different
+interaction than a tenant/buyer's actual question ("should I take this
+apartment?") — that's a document/report interaction, not a map
+interaction. The map is kept as a secondary/optional page, not the
+homepage. The product also grew a comparison layer (citywide → borough →
+neighborhood → building) so a pattern label like "Chronic" can be read
+against what's actually typical for that block, using data that already
+existed (`data/neighborhoods.json`'s per-neighborhood pattern counts —
+pure arithmetic, no new calibration).
 
-- **Who is the user?** Options discussed: a prospective tenant/buyer, a city
-  inspector/regulator, a building owner/landlord, a policy analyst/advocate.
-- **What decision does the product support?** Options discussed: triage a
-  single building, prioritize across many buildings, predict/flag future
-  risk.
+See `docs/BUILD_LOG.md` for the full running log of what shipped and why,
+kept up to date across sessions — check it before assuming this section is
+still current.
 
-**My (Claude's) recommendation, given as a strong opinion, not yet decided
-by the user:** a prospective tenant/buyer, triaging a single building.
-Reasoning:
+**Original reasoning for the tenant/buyer, single-building decision**
+(options considered were also a city inspector/regulator, a building
+owner/landlord, or a policy analyst/advocate; and portfolio-prioritization
+or risk-prediction as alternative decision types):
 
 - It's the smallest real gap between what exists and what's needed - the
   six-dimension engine and evidence cards already answer nearly this
@@ -100,9 +110,6 @@ Reasoning:
   after hand-verifying whatever ranking logic gets built against real
   buildings first, the same way every threshold in this codebase was
   verified before being trusted.
-
-**Not yet resolved:** the user had not picked an option when this note was
-written. Pick up the conversation there.
 
 ## Inherited components (working, already verified - not a fresh start)
 

@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building Report — NYC Building Stories</title>
+<link rel="stylesheet" href="styles/report.css">
+<script src="src/building_story.js"></script>
+<script src="src/aggregate.js"></script>
+<script src="src/decision_layer.js"></script>
+</head>
+<body>
+<div class="page" id="page">
+  <div class="crumbs" id="crumbs">
+    <a href="index.html">Citywide</a>
+  </div>
+
+  <div id="content">
+    <div class="loading">Loading building record…</div>
+  </div>
+
+  <div class="disclaimer">
+    This report reads NYC's public HPD Open Violations records for this one building.
+    It is not legal or professional advice — verify anything that matters with the
+    landlord, seller, or a qualified professional before deciding.
+  </div>
+</div>
+
+<script>
+const PATTERN_COLORS = {
+  "No real defects": [80, 170, 70],
+  "Isolated":   [64, 216, 200],
+  "Widespread": [66, 133, 224],
+  "Persistent": [230, 180, 60],
+  "Chronic":    [220, 70, 60],
+};
+const PATTERN_LABELS = {
+  "No real defects": "No real defects",
+  "Isolated":   "Isolated",
+  "Widespread": "Widespread",
+  "Persistent": "Persistent",
+  "Chronic":    "Chronic",
+};
+const EVIDENCE_DISPLAY_LIMIT = 25;
+
+function qs(name) {
+  return new URLSearchParams(location.search).get(name);
+}
+
+function rgb(pattern) {
+  return `rgb(${(PATTERN_COLORS[pattern] || [120,120,120]).join(',')})`;
+}
+
+function buildEvidenceFromRecords(records) {
+  const seen = new Set();
+  const trimmed = [];
+  for (const v of records) {
+    let desc = (v.novdescription || '').trim();
+    if (desc.length > 140) {
+      const cut = desc.slice(0, 140);
+      desc = cut.slice(0, cut.lastIndexOf(' ')) + '...';
+    }
+    const date = v.novissueddate ? v.novissueddate.slice(0, 10) : null;
+    const key = `${date}|${v.class}|${desc}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      trimmed.push({ date, class: v.class, status: v.currentstatus, description: desc });
+    }
+  }
+  trimmed.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  return trimmed;
+}
+
+function renderEvidenceHTML(records) {
+  const shown = records.slice(0, EVIDENCE_DISPLAY_LIMIT);
+  return shown.map(r => `
+    <div class="ev-row">
+      <div class="ev-top"><span class="${['A','B','C'].includes(r.class) ? 'ev-class-' + r.class : ''}">${r.date || 'no date'} · Class ${r.class || '?'}</span><span>${r.status || ''}</span></div>
+      <div class="ev-desc">${r.description || ''}</div>
+    </div>`).join('') +
+    (records.length > EVIDENCE_DISPLAY_LIMIT
+      ? `<div class="list-more">showing ${EVIDENCE_DISPLAY_LIMIT} of ${records.length} records</div>` : '');
+}
+
+function distributionHTML(counts) {
+  const dist = patternDistribution(counts);
+  const bar = PATTERN_ORDER.map(p => `<div style="width:${dist[p]}%; background:${rgb(p)}"></div>`).join('');
+  const legend = PATTERN_ORDER.map(p =>
+    `<span><span class="sw" style="background:${rgb(p)}"></span>${PATTERN_LABELS[p]}<span class="pct">${dist[p]}%</span></span>`
+  ).join('');
+  return `<div class="dist-bar">${bar}</div><div class="dist-legend">${legend}</div>`;
+}
+
+function buildCrumbs(neighborhood, boro, address) {
+  const el = document.getElementById('crumbs');
+  const parts = [`<a href="index.html">Citywide</a>`];
+  if (boro) parts.push(`<span class="sep">›</span><a href="borough.html?name=${encodeURIComponent(boro)}">${boroDisplay(boro)}</a>`);
+  if (neighborhood) parts.push(`<span class="sep">›</span><a href="neighborhood.html?name=${encodeURIComponent(neighborhood)}">${neighborhood}</a>`);
+  parts.push(`<span class="sep">›</span><span class="current">${address || 'Building'}</span>`);
+  el.innerHTML = parts.join('');
+}
+
+function boroDisplay(b) {
+  return b ? b.charAt(0) + b.slice(1).toLowerCase() : b;
+}
+
+async function main() {
+  const buildingid = qs('buildingid');
+  const addressParam = qs('address');
+  let neighborhood = qs('neighborhood');
+  let boro = qs('boro');
+  buildCrumbs(neighborhood, boro, addressParam);
+
+  if (!buildingid) {
+    document.getElementById('content').innerHTML = `<div class="empty">No building specified.<br><br><a class="btn-link" href="index.html">← Search for an address</a></div>`;
+    return;
+  }
+
+  const [neighborhoodsData, records] = await Promise.all([
+    fetch('data/neighborhoods.json').then(r => r.json()).catch(() => []),
+    fetch(`https://data.cityofnewyork.us/resource/csn4-vhvf.json?$where=buildingid='${buildingid}'&$limit=5000`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+  ]);
+
+  // Fill in neighborhood/boro from the batch dataset only if the link didn't
+  // already carry them (e.g. someone opened this URL directly).
+  if ((!neighborhood || !boro) && records.length === 0) {
+    // nothing to look up against without records; leave breadcrumb as-is
+  } else if (!neighborhood || !boro) {
+    try {
+      const mapData = await fetch('data/map_dataset.json').then(r => r.json());
+      const row = mapData.find(d => String(d.buildingid) === String(buildingid));
+      if (row) { neighborhood = neighborhood || row.neighborhood; boro = boro || row.boro; }
+    } catch (e) { /* comparison section just won't render if this fails */ }
+  }
+
+  if (!records.length) {
+    document.getElementById('content').innerHTML = `<div class="empty">No live records returned for this building right now — NYC's API may be slow. Try reloading.</div>`;
+    return;
+  }
+
+  const profile = buildProfile(buildingid, records, new Date());
+  const narrative = generateNarrative(profile);
+  const evidence = buildEvidenceFromRecords(records);
+  const dims = translateDimensions(profile);
+  const flags = getCautionFlags(profile);
+
+  buildCrumbs(neighborhood, boro, profile.address);
+
+  let html = '';
+
+  html += `
+    <div class="card">
+      <div class="hero">
+        <span class="pattern-dot" style="background:${rgb(profile.pattern)}"></span>
+        <h1>${profile.address}</h1>
+      </div>
+      <div class="sub">
+        <span class="pattern-badge"><span class="pattern-dot" style="background:${rgb(profile.pattern)}"></span>${profile.pattern} · ${profile.scale} scale</span>
+      </div>
+      <div class="narrative">${narrative}</div>
+    </div>`;
+
+  html += `
+    <div class="card">
+      <h2>Worth extra caution?</h2>
+      ${flags.length
+        ? flags.map(f => `<div class="flag"><div class="flag-label">⚠ ${f.label}</div><div class="flag-reason">${f.reason}</div></div>`).join('')
+        : `<div class="no-flags">None of the caution patterns this report checks for apply to this building.</div>`}
+    </div>`;
+
+  html += `
+    <div class="card">
+      <h2>What each dimension means for you</h2>
+      <div class="dims-grid">
+        ${dims.map(d => `<div class="dim-card"><div class="dim-k">${d.dimension}</div><div class="dim-meaning">${d.meaning}</div><div class="dim-q">${d.question}</div></div>`).join('')}
+      </div>
+    </div>`;
+
+  if (neighborhood && boro && neighborhoodsData.length) {
+    const nRow = neighborhoodsData.find(n => n.neighborhood === neighborhood && n.boro === boro);
+    const boroC = boroRollup(neighborhoodsData, boro);
+    const cityC = citywideRollup(neighborhoodsData);
+    html += `
+      <div class="card">
+        <h2>How this compares</h2>
+        ${nRow ? `<div class="compare-row"><div class="compare-label">${neighborhood}</div></div>${distributionHTML(neighborhoodCounts(nRow))}` : ''}
+        <div style="height:10px"></div>
+        <div class="compare-row"><div class="compare-label">${boroDisplay(boro)}</div></div>
+        ${distributionHTML(boroC)}
+        <div style="height:10px"></div>
+        <div class="compare-row"><div class="compare-label">Citywide</div></div>
+        ${distributionHTML(cityC)}
+      </div>`;
+  }
+
+  html += `
+    <div class="card">
+      <h2>Evidence</h2>
+      <div class="evidence-toggle" id="ev-toggle">Why we're saying this → <span class="count">(${evidence.length} record${evidence.length !== 1 ? 's' : ''})</span></div>
+      <div class="evidence-table" id="ev-table">${renderEvidenceHTML(evidence)}</div>
+    </div>`;
+
+  document.getElementById('content').innerHTML = html;
+  document.getElementById('ev-toggle').onclick = () => document.getElementById('ev-table').classList.toggle('open');
+}
+
+main().catch(err => {
+  console.error('Building report failed:', err);
+  document.getElementById('content').innerHTML = `<div class="empty">Something went wrong loading this building's record. Try reloading.</div>`;
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Citywide Report — NYC Building Stories</title>
+<link rel="stylesheet" href="styles/report.css">
+<script src="src/aggregate.js"></script>
+</head>
+<body>
+<div class="page" id="page">
+  <div class="crumbs"><span class="current">Citywide</span></div>
+  <div id="content"><div class="loading">Loading citywide record…</div></div>
+</div>
+
+<script>
+const PATTERN_COLORS = {
+  "No real defects": [80, 170, 70],
+  "Isolated":   [64, 216, 200],
+  "Widespread": [66, 133, 224],
+  "Persistent": [230, 180, 60],
+  "Chronic":    [220, 70, 60],
+};
+const PATTERN_LABELS = { "No real defects": "No real defects", "Isolated": "Isolated", "Widespread": "Widespread", "Persistent": "Persistent", "Chronic": "Chronic" };
+const BOROS = ["MANHATTAN", "BROOKLYN", "QUEENS", "BRONX", "STATEN ISLAND"];
+
+function rgb(pattern) { return `rgb(${(PATTERN_COLORS[pattern] || [120,120,120]).join(',')})`; }
+function boroDisplay(b) { return b ? b.charAt(0) + b.slice(1).toLowerCase() : b; }
+
+function distributionHTML(counts) {
+  const dist = patternDistribution(counts);
+  const bar = PATTERN_ORDER.map(p => `<div style="width:${dist[p]}%; background:${rgb(p)}"></div>`).join('');
+  const legend = PATTERN_ORDER.map(p =>
+    `<span><span class="sw" style="background:${rgb(p)}"></span>${PATTERN_LABELS[p]}<span class="pct">${dist[p]}%</span></span>`
+  ).join('');
+  return `<div class="dist-bar">${bar}</div><div class="dist-legend">${legend}</div>`;
+}
+
+async function main() {
+  const neighborhoods = await fetch('data/neighborhoods.json').then(r => r.json());
+  const cityC = citywideRollup(neighborhoods);
+
+  const boroRows = BOROS.map(b => ({ boro: b, counts: boroRollup(neighborhoods, b) })).filter(r => r.counts.total > 0);
+  boroRows.sort((a, b) => b.counts.total - a.counts.total);
+
+  const boroHTML = boroRows.map(r => `
+    <div style="margin-bottom:14px;">
+      <div class="compare-row"><div class="compare-label"><a href="borough.html?name=${encodeURIComponent(r.boro)}" style="color:#d0d3dd; text-decoration:none;">${boroDisplay(r.boro)}</a></div><div class="compare-vals"><span>${r.counts.total.toLocaleString()} buildings</span></div></div>
+      ${distributionHTML(r.counts)}
+    </div>`).join('');
+
+  document.getElementById('content').innerHTML = `
+    <div class="card">
+      <div class="hero"><h1>NYC, citywide</h1></div>
+      <div class="sub">${cityC.total.toLocaleString()} buildings analyzed across ${neighborhoods.length} neighborhoods and ${boroRows.length} boroughs</div>
+    </div>
+
+    <div class="card">
+      <h2>Citywide pattern distribution</h2>
+      ${distributionHTML(cityC)}
+      <div class="compare-row" style="margin-top:6px;"><div class="compare-label">Long-unresolved violations</div><div class="compare-vals"><span>${cityC.long_unresolved.toLocaleString()} of ${cityC.total.toLocaleString()} buildings</span></div></div>
+    </div>
+
+    <div class="card">
+      <h2>By borough</h2>
+      ${boroHTML}
+    </div>`;
+}
+
+main().catch(err => {
+  console.error('Citywide report failed:', err);
+  document.getElementById('content').innerHTML = `<div class="empty">Something went wrong loading citywide data. Try reloading.</div>`;
+});
+</script>
+</body>
+</html>

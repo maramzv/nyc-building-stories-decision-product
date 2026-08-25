@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Borough Report — NYC Building Stories</title>
+<link rel="stylesheet" href="styles/report.css">
+<script src="src/aggregate.js"></script>
+</head>
+<body>
+<div class="page" id="page">
+  <div class="crumbs" id="crumbs"><a href="index.html">Citywide</a></div>
+  <div id="content"><div class="loading">Loading borough record…</div></div>
+</div>
+
+<script>
+const PATTERN_COLORS = {
+  "No real defects": [80, 170, 70],
+  "Isolated":   [64, 216, 200],
+  "Widespread": [66, 133, 224],
+  "Persistent": [230, 180, 60],
+  "Chronic":    [220, 70, 60],
+};
+const PATTERN_LABELS = { "No real defects": "No real defects", "Isolated": "Isolated", "Widespread": "Widespread", "Persistent": "Persistent", "Chronic": "Chronic" };
+
+function qs(name) { return new URLSearchParams(location.search).get(name); }
+function rgb(pattern) { return `rgb(${(PATTERN_COLORS[pattern] || [120,120,120]).join(',')})`; }
+function boroDisplay(b) { return b ? b.charAt(0) + b.slice(1).toLowerCase() : b; }
+
+function distributionHTML(counts) {
+  const dist = patternDistribution(counts);
+  const bar = PATTERN_ORDER.map(p => `<div style="width:${dist[p]}%; background:${rgb(p)}"></div>`).join('');
+  const legend = PATTERN_ORDER.map(p =>
+    `<span><span class="sw" style="background:${rgb(p)}"></span>${PATTERN_LABELS[p]}<span class="pct">${dist[p]}%</span></span>`
+  ).join('');
+  return `<div class="dist-bar">${bar}</div><div class="dist-legend">${legend}</div>`;
+}
+
+function concerningShare(n) {
+  const total = n.total || 1;
+  return (n.chronic + n.persistent) / total;
+}
+
+function nbhdRowHTML(n) {
+  const share = Math.round(concerningShare(n) * 1000) / 10;
+  return `<a class="list-row" href="neighborhood.html?name=${encodeURIComponent(n.neighborhood)}">
+    <div><div class="list-main">${n.neighborhood}</div><div class="list-sub">${n.total.toLocaleString()} buildings</div></div>
+    <div class="list-tag" style="color:${share > 0 ? rgb('Chronic') : '#767c8c'}">${share}% chronic/persistent</div>
+  </a>`;
+}
+
+async function main() {
+  const name = qs('name');
+  if (!name) {
+    document.getElementById('content').innerHTML = `<div class="empty">No borough specified. <a class="btn-link" href="index.html">← Home</a></div>`;
+    return;
+  }
+
+  const neighborhoods = await fetch('data/neighborhoods.json').then(r => r.json());
+  const boroNbhds = neighborhoods.filter(n => n.boro === name);
+  if (!boroNbhds.length) {
+    document.getElementById('content').innerHTML = `<div class="empty">Borough not found. <a class="btn-link" href="index.html">← Home</a></div>`;
+    return;
+  }
+
+  document.getElementById('crumbs').innerHTML =
+    `<a href="index.html">Citywide</a><span class="sep">›</span><span class="current">${boroDisplay(name)}</span>`;
+
+  const boroC = boroRollup(neighborhoods, name);
+  const cityC = citywideRollup(neighborhoods);
+  const sorted = [...boroNbhds].sort((a, b) => concerningShare(b) - concerningShare(a));
+
+  document.getElementById('content').innerHTML = `
+    <div class="card">
+      <div class="hero"><h1>${boroDisplay(name)}</h1></div>
+      <div class="sub">${boroC.total.toLocaleString()} buildings analyzed across ${boroNbhds.length} neighborhoods</div>
+    </div>
+
+    <div class="card">
+      <h2>Pattern distribution</h2>
+      <div class="compare-row"><div class="compare-label">${boroDisplay(name)}</div></div>
+      ${distributionHTML(boroC)}
+      <div style="height:10px"></div>
+      <div class="compare-row"><div class="compare-label">Citywide</div></div>
+      ${distributionHTML(cityC)}
+      <div class="compare-row" style="margin-top:6px;"><div class="compare-label">Long-unresolved violations</div><div class="compare-vals"><span>${boroC.long_unresolved.toLocaleString()} of ${boroC.total.toLocaleString()} buildings</span></div></div>
+    </div>
+
+    <div class="card">
+      <h2>Neighborhoods in ${boroDisplay(name)}, by share of chronic/persistent buildings</h2>
+      <div id="nbhd-list">${sorted.map(nbhdRowHTML).join('')}</div>
+    </div>`;
+}
+
+main().catch(err => {
+  console.error('Borough report failed:', err);
+  document.getElementById('content').innerHTML = `<div class="empty">Something went wrong loading this borough. Try reloading.</div>`;
+});
+</script>
+</body>
+</html>

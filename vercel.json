@@ -3,6 +3,11 @@
   "buildCommand": null,
   "outputDirectory": ".",
   "rewrites": [
-    { "source": "/", "destination": "/map.html" }
+    { "source": "/", "destination": "/index.html" },
+    { "source": "/report", "destination": "/report.html" },
+    { "source": "/neighborhood", "destination": "/neighborhood.html" },
+    { "source": "/borough", "destination": "/borough.html" },
+    { "source": "/citywide", "destination": "/citywide.html" },
+    { "source": "/map", "destination": "/map.html" }
   ]
 }
